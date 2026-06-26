@@ -1,13 +1,14 @@
-<div align="center">
+<p align="center">
 <img src= "res/logo.svg" alt="scalpr" width="110" />
-
-<img src= "res/name.svg" alt="scalpr" width="110" />
-
+</p>
+<p align="center">
+<img src= "res/name.svg" alt="scalpr" width="110" />  
+</p>
+<p align="center">
 <img src="https://img.shields.io/badge/version-0.0.1-blue?logo=github" />
 <img src="https://img.shields.io/badge/license-MIT-green" />
 <img src="https://img.shields.io/badge/status-alpha-orange" />
-
-</div>
+</p>
 <div align="center">
 
 ### Scalp smarter.
