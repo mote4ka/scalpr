@@ -1,9 +1,10 @@
 <div align="center">
 
 <p>
-<img src= "res/logo.svg" alt="scalpr" width="110" />
+<img src= "res/logo.svg" alt="scalpr" width="110" />  
 
 <img src= "res/name.svg" alt="scalpr" width="110" />
+</p>
 
 <img src="https://img.shields.io/badge/version-0.0.1-blue?logo=github" />
 <img src="https://img.shields.io/badge/license-MIT-green" />
