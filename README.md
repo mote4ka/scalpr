@@ -12,19 +12,25 @@
 <div align="center">
 
 ### Scalp smarter.
-### Practice in the past. Win in the present.
 
 ---
 
-**Scalpr** is a professional backtesting and training platform built specifically for scalp traders.  
-Replay real market conditions, sharpen your entries, and build an unbeatable edge — all before risking a single dollar.
+**Scalpr** is a project for training, evaluating, and deploying neural network models that perform high-frequency scalping decisions based on real-time order book (DOM / Level 2) data.
 
----
+
+</div>
+
+
+<div align="center"> 
+
+# **Work in Progress** 
+
 </div>
 
 
 
 <div align="center"> 
+
 
 ### 📬 Contact
  

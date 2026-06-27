@@ -1,6 +1,8 @@
 import websockets
 import asyncio
 import json
+from utils import *
+from logger import logger
 
 async def main():
     
@@ -13,22 +15,29 @@ async def main():
     
     orderbook = {"topic": "orderbook.200.BTCUSDT",
                  "type": "snapshot",
-                 "data": [ ["123123","16493.50","0.006"] ]
+                 "data": [ { "time": 123123, "asks": [], "bids": []} ]
     }
     
     orderbook["data"].append([0,0])
     print(orderbook)
     
-    with open('data/orderbook.json', 'w') as file:
-        async with websockets.connect(ws_url) as wss:
-            await wss.send(json.dumps(subscriptions))
-            while True:
-                message = await wss.recv()
-                #print(message)
-                if message.get("type") == "delta": print('delta')
-                new_record = [message.get('ts'), message.get('data').get('b'), message.get('s')]
-                orderbook["data"].append([message])
-                #file.write(json.dumps(message))
+
+    async with websockets.connect(ws_url) as wss:
+        await wss.send(json.dumps(subscriptions))
+        while True:
+            try:
+                message = json.loads(await wss.recv())
+                if message == None:
+                    logger.info("Message is NULL")
+                elif message.get("type") == "delta": print('delta')
+                else:
+                    new_record = {message.get('ts'), message.get('data').get('a'), message.get('data').get('b')}
+                    JsonWrite("data/record.json", new_record)
+                    orderbook["data"].append([new_record])
+                    JsonWrite("data/orderbook.json",orderbook)
+            except Exception as e:
+                logger.error(e)
+
                 
             
 if __name__ == "__main__":
