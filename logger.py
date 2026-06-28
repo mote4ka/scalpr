@@ -1,15 +1,6 @@
 import logging
 from rich.logging import RichHandler
 
-# Success log level
-SUCCESS = 25
-logging.addLevelName(SUCCESS, "SUCCESS")
-
-def success(self, message, *args, **kws):
-    if self.isEnabledFor(SUCCESS):
-        self._log(SUCCESS, message, args, **kws)
-        
-logging.Logger.success = success
 
 
 # Console formatter
@@ -34,7 +25,6 @@ class ConsoleFormatter(logging.Formatter):
         logging.WARNING: yellow + format + reset,
         logging.ERROR: red + format + reset,
         logging.CRITICAL: bold_red + format + reset,
-        SUCCESS: green + format + reset
     }
 
     def format(self, record):
@@ -133,7 +123,8 @@ import sys
 import traceback
 
 def HandleException(e: Exception):
-    logger.error(f'{e} at line {traceback.extract_tb(sys.exc_info()[2])[-1][1]}', extra={'file_only': DEBUG})
+    console.print_exception(show_locals=True)
+    logger.error(f'{e} at line {traceback.extract_tb(sys.exc_info()[2])[-1][1]}', extra={'file_only': True})
 
     
 def HandleCritical(e: Exception):

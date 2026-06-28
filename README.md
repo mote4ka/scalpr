@@ -11,11 +11,11 @@
 </p>
 <div align="center">
 
-### Scalp smarter.
+> ## *Scalp smarter.*
 
 ---
 
-**Scalpr** is a project for training, evaluating, and deploying neural network models that perform high-frequency scalping decisions based on real-time order book (DOM / Level 2) data.
+**Scalpr** is a project for training, evaluating, and deploying neural network models that perform high-frequency scalping decisions based on real-time order book (DOM / Level 2) data and trades flow.
 
 
 </div>
@@ -23,11 +23,13 @@
 
 <div align="center"> 
 
-# **Work in Progress** 
+### **Work in Progress** 
+
+<img src= "res/cat-bablo.gif" alt="scalpr" width="110" />  
 
 </div>
 
-
+---
 
 <div align="center"> 
 
