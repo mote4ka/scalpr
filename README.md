@@ -11,7 +11,7 @@
 </p>
 <div align="center">
 
-> ## *Scalp smarter.*
+### *Scalp smarter.*
 
 ---
 
