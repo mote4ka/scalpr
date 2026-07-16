@@ -3,7 +3,7 @@ import asyncio
 import json
 from utils import *
 from logger import logger, HandleException
-from conn_data import *
+from workers.conn_data import *
 
 
 

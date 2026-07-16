@@ -3,11 +3,11 @@ import asyncio
 import json
 from utils import *
 from logger import logger, HandleException
-from conn_data import *
+from workers.conn_data import *
 
 
 
-async def normalizePrices(asks: list, bids: list) -> :
+async def normalizePrices(asks: list, bids: list):
     """
     Input:
         asks: list of asks with structure [price, qty]
@@ -23,16 +23,33 @@ async def normalizePrices(asks: list, bids: list) -> :
     bid_price = sessionData.get('market_bid')
     
     
-    normalizedAsks = [ [ round((float(value[0]) - ask_price)/ask_price, 5) , float(value[1])] for value in asks]
-    normalizedBids = [ [ round((float(value[0]) - bids)/bids, 5) , float(value[1])] for value in bids]
+    normalizedAsks = [ [ round((float(value[0]) - ask_price)/ask_price*100, 7) , float(value[1])] for value in asks]
+    normalizedBids = [ [ round((float(value[0]) -bid_price)/bid_price*100, 7) , float(value[1])] for value in bids]
+    #print(normalizedAsks)
+    #print(normalizedBids)
     
-    normalizeDOM = normalizedAsks.extend(normalizedBids)
+    normalizedAsks.reverse()
+    normalizedAsks.extend(normalizedBids)
 
-    return normalizeDOM
+    return normalizedAsks
 
 
 async def dataWorker(data: dict) -> None:
+    # init session if not initted
+    if sessionData.get("ts") is None:
+        initSession(float(data.get('data').get('a')[0][0]), float(data.get('data').get('b')[0][0]))
+        
+    # initSession before type check because first message is always snapshot 
+    # normalize order book if type is snapshot
+    if data.get("type") == "snapshot":   
+        normalizedDOM = await normalizePrices(data.get('data').get('a'), data.get('data').get('b'))
     
+        JsonWrite("data/orderbook.json", data)
+        JsonWrite("data/normalized_dom.json", normalizedDOM)
+    
+    if data.get("type") == "delta":  
+        pass   
+        
 
 
 async def orderbookHandler():
@@ -43,11 +60,22 @@ async def orderbookHandler():
                 print("Orderbook: subscription sent")
 
                 async for message in ws:
+                    
+                    
+                    
                     data = json.loads(message)
                     if data.get("op") == "subscribe":
                         logger.info("Subscribed to ORDERBOOK")
                         continue
-                    JsonWrite('data/orderbook.json', data)
+                    
+                    # pong_received = await ws.ping()  
+                    # # only if you want to wait for the corresponding pong  
+                    # latency = await pong_received
+                    # print(f"{latency * 1000:.2f} ms")
+                    
+                    await dataWorker(data)
+                    
+                    
         except KeyboardInterrupt:
             logger.info('Closing connection...')
         except Exception as e:
