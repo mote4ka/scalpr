@@ -22,7 +22,7 @@ from scalpr_scanner.spread import (
     spread_frame,
     windows,
 )
-from scalpr_scanner.xemm import Xemm, xemm
+from scalpr_scanner.xemm import QUOTE_MODES, Xemm, xemm
 
 CHARTS_DIR = DATA_DIR / "charts"
 
@@ -42,7 +42,8 @@ def main() -> None:
     parser.add_argument("--entry", type=float, help="enter when the deviation is this %% away from the basis, default: fees + crossing cost of taker legs")
     parser.add_argument("--fill", choices=FILL_RULES, default="through", help="maker order is filled by a trade past its price (through, default) or at it (touch)")
     parser.add_argument("--exit-timeout", default="5min", help="maker exit order not filled in this time is closed with a taker order (default 5min)")
-    parser.add_argument("--latency", default="0ms", help="delay from a maker fill to the hedge order (default 0ms)")
+    parser.add_argument("--latency", default="0ms", help="delay from a maker fill to the hedge order, with tick quotes also of every quote change (default 0ms)")
+    parser.add_argument("--quotes", choices=QUOTE_MODES, default="tick", help="xemm: quotes follow every hedge book update (tick, default) or one per grid step (grid)")
     parser.add_argument("--strategy", choices=("basis", "xemm"), default="basis",
                         help="basis: trade the return to the basis; xemm: quote one exchange all the time and hedge every fill on the other (default basis)")
     parser.add_argument("--edge", type=float, default=0.25, help="xemm: quotes are this %% away from the fair price (default 0.25)")
@@ -68,7 +69,7 @@ def main() -> None:
 
     if args.strategy == "xemm":
         hedge_on = "bybit" if maker == "htx" else "htx"
-        result = xemm(spreads, basis_line, native, grid, tape, maker, args.notional, args.edge, args.max_position, args.fill, args.latency)
+        result = xemm(spreads, basis_line, native, grid, tape, maker, args.notional, args.edge, args.max_position, args.fill, args.latency, args.quotes)
         print_market_making(result, maker, args.edge, args.max_position, args.fill, args.top)
         title = f"{args.ticker} {args.day} UTC: market making on {LABELS[maker]} {args.edge}% from fair, hedge on {LABELS[hedge_on]}"
         path = CHARTS_DIR / f"{args.ticker}_{args.day}_xemm-{maker}.html"

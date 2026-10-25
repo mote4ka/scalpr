@@ -15,7 +15,7 @@ from scalpr_scanner.history import load_day
 from scalpr_scanner.maker import FILL_RULES
 from scalpr_scanner.screener import SCREENS_DIR
 from scalpr_scanner.spread import basis, exchange_prices, spread_frame
-from scalpr_scanner.xemm import Xemm, xemm
+from scalpr_scanner.xemm import QUOTE_MODES, Xemm, xemm
 
 BACKTESTS_DIR = DATA_DIR / "backtests"
 # htx publishes day D after 16:00 UTC of D+1: the day before yesterday is the last one surely complete
@@ -35,7 +35,8 @@ def main() -> None:
     parser.add_argument("--notional", type=float, default=100, help="quote size in USDT (default 100)")
     parser.add_argument("--max-position", type=float, default=300, help="a side stops quoting at this inventory in USDT (default 300)")
     parser.add_argument("--fill", choices=FILL_RULES, default="through", help="fill rule when our quote is level with the book (default through)")
-    parser.add_argument("--latencies", default="0ms", help="delays from a fill to the hedge, comma separated (default 0ms)")
+    parser.add_argument("--latencies", default="0ms", help="delays from a fill to the hedge and, with tick quotes, of every quote change; comma separated (default 0ms)")
+    parser.add_argument("--quotes", choices=QUOTE_MODES, default="tick", help="quotes follow every hedge book update (tick, default) or one per grid step (grid)")
     parser.add_argument("--depth", type=int, default=20, help="book levels to load (default 20)")
     parser.add_argument("--freq", default="1s", help="quote refresh step (default 1s)")
     parser.add_argument("--basis-window", default="1h", help="rolling window of the basis (default 1h)")
@@ -105,8 +106,8 @@ async def run(tickers: list[str], days: list[date], edges: list[float], latencie
             # share of the day both books are there (a partial htx day is shorter)
             coverage = (grid["bybit"]["mid"].notna() & grid["htx"]["mid"].notna()).mean()
             for latency, edge in product(latencies, edges):
-                result = xemm(spreads, basis_line, native, grid, tape, "htx", args.notional, edge, args.max_position, args.fill, latency)
-                rows.append({"latency": latency, **summary(ticker, day, edge, coverage, result)})
+                result = xemm(spreads, basis_line, native, grid, tape, "htx", args.notional, edge, args.max_position, args.fill, latency, args.quotes)
+                rows.append({"quotes": args.quotes, "latency": latency, **summary(ticker, day, edge, coverage, result)})
     finally:
         await manager.closeSession()
     return DataFrame(rows)
