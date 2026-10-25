@@ -39,18 +39,25 @@ def main() -> None:
     parser.add_argument("--depth", type=int, default=20, help="book levels to load (default 20)")
     parser.add_argument("--freq", default="1s", help="quote refresh step (default 1s)")
     parser.add_argument("--basis-window", default="1h", help="rolling window of the basis (default 1h)")
+    parser.add_argument("--train-until", type=date.fromisoformat,
+                        help="out of sample check: pick each coin's edge on the days up to this one, trade it on the later days")
+    parser.add_argument("--results", type=Path, help="print a saved results parquet instead of simulating again")
     args = parser.parse_args()
 
-    tickers = args.tickers.split(",") if args.tickers else top_candidates(args.screen, args.top)
-    days = [args.last_day - timedelta(days=back) for back in reversed(range(args.days))]
-    edges = [float(edge) for edge in args.edges.split(",")]
-    logger.info(f"{len(tickers)} coins x {len(days)} days ({days[0]} .. {days[-1]}) x edges {edges}")
-
-    results = asyncio.run(run(tickers, days, edges, args))
-    path = BACKTESTS_DIR / f"{datetime.now(UTC):%Y-%m-%d_%H%M}.parquet"
-    write_parquet(results, path)
-    print_results(results, len(days))
-    logger.info(f"Results saved to {path}")
+    if args.results:
+        results = read_parquet(args.results)
+    else:
+        tickers = args.tickers.split(",") if args.tickers else top_candidates(args.screen, args.top)
+        days = [args.last_day - timedelta(days=back) for back in reversed(range(args.days))]
+        edges = [float(edge) for edge in args.edges.split(",")]
+        logger.info(f"{len(tickers)} coins x {len(days)} days ({days[0]} .. {days[-1]}) x edges {edges}")
+        results = asyncio.run(run(tickers, days, edges, args))
+        path = BACKTESTS_DIR / f"{datetime.now(UTC):%Y-%m-%d_%H%M}.parquet"
+        write_parquet(results, path)
+        logger.info(f"Results saved to {path}")
+    print_results(results, results["day"].nunique())
+    if args.train_until:
+        print_out_of_sample(results, args.train_until)
 
 
 def top_candidates(screen_path: Path | None, top: int) -> list[str]:
@@ -145,3 +152,51 @@ def print_results(results: DataFrame, days: int) -> None:
     if "error" in results:
         for _, row in results.dropna(subset=["error"]).iterrows():
             console.print(f"[yellow]skipped {row['ticker']} {row['day']}: {row['error']}[/]")
+
+
+# OUT OF SAMPLE: each coin's edge is the best one on the train days (up to `train_until`), a coin is traded only
+# if that edge made money there; the test days show what this choice would have earned, next to the best edge
+# picked with hindsight on the test days themselves
+def print_out_of_sample(results: DataFrame, train_until: date) -> None:
+    done = results.dropna(subset=["pnl"]) if "pnl" in results else results.iloc[0:0]
+    train, test = done[done["day"] <= str(train_until)], done[done["day"] > str(train_until)]
+    if train.empty or test.empty:
+        console.print(f"[red]no days on one side of {train_until}[/]")
+        return
+    train_pnl = train.groupby(["ticker", "edge"])["pnl"].sum()
+    test_pnl = test.groupby(["ticker", "edge"])["pnl"].sum()
+    train_days, test_days = train.groupby("ticker")["day"].nunique(), test.groupby("ticker")["day"].nunique()
+    test_wins = test.groupby(["ticker", "edge"])["pnl"].agg(lambda pnl: (pnl > 0).sum())
+
+    rows = []
+    for ticker, (_, edge) in train_pnl.groupby(level="ticker").idxmax().items():
+        if ticker not in test_days:
+            continue
+        hindsight = test_pnl.loc[ticker].idxmax()
+        rows.append({
+            "ticker": ticker,
+            "edge": edge,
+            "train/day": train_pnl[ticker, edge] / train_days[ticker],
+            "traded": train_pnl[ticker, edge] > 0,
+            "test/day": test_pnl.get((ticker, edge), float("nan")) / test_days[ticker],
+            "test wins": f"{test_wins.get((ticker, edge), 0)} / {test_days[ticker]}",
+            "hindsight edge": hindsight,
+            "hindsight/day": test_pnl[ticker, hindsight] / test_days[ticker],
+        })
+    table_rows = DataFrame(rows).sort_values("train/day", ascending=False)
+
+    table = Table(title=f"Out of sample: edge picked on days up to {train_until}, traded on the days after (pnl per day, USDT)")
+    for column in ("ticker", "train edge", "train", "traded", "test", "test win days", "hindsight edge", "hindsight"):
+        table.add_column(column, justify="right")
+    for _, row in table_rows.iterrows():
+        table.add_row(
+            row["ticker"], f"{row['edge']:g}%", f"{row['train/day']:+.2f}", "yes" if row["traded"] else "no",
+            f"{row['test/day']:+.2f}", row["test wins"], f"{row['hindsight edge']:g}%", f"{row['hindsight/day']:+.2f}",
+        )
+    traded = table_rows[table_rows["traded"]]
+    table.add_section()
+    table.add_row(
+        f"{len(traded)} traded", "", f"{traded['train/day'].sum():+.2f}", "", f"{traded['test/day'].sum():+.2f}", "", "",
+        f"{table_rows['hindsight/day'].clip(lower=0).sum():+.2f}",
+    )
+    console.print(table)
