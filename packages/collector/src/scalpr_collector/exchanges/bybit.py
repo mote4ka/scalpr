@@ -6,8 +6,15 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import aiohttp
-from pandas import DataFrame, DatetimeIndex, read_csv, read_parquet, to_datetime
-from scalpr_collector.http_client import retry_download
+from pandas import (
+    DataFrame,
+    DatetimeIndex,
+    read_csv,
+    read_parquet,
+    to_datetime,
+    to_numeric,
+)
+from scalpr_collector.http_client import retry_download, retry_fetch
 from scalpr_collector.orderbook import Message, book_frame, load_frame, save_frame
 from scalpr_collector.progress import track_lines
 from scalpr_collector.storage import write_parquet
@@ -19,6 +26,7 @@ from scalpr_core.paths import DATA_DIR
 ARCHIVE_URL = "https://quote-saver.bycsi.com/orderbook/linear/{ticker}/{name}"
 # daily trades, one UTC day per file: https://public.bybit.com/trading/
 TRADES_URL = "https://public.bybit.com/trading/{ticker}/{name}"
+TICKERS_URL = "https://api.bybit.com/v5/market/tickers"
 FEED_LEVELS = 200
 HISTORY_DIR = DATA_DIR / "history" / "bybit"
 
@@ -71,6 +79,18 @@ async def get_trades_history(session: aiohttp.ClientSession, ticker: str, day: d
     frame = await asyncio.to_thread(_trades_frame, path)
     await asyncio.to_thread(write_parquet, frame, cached)
     return frame
+
+
+# live snapshot of every perp
+async def get_tickers(session: aiohttp.ClientSession) -> DataFrame:
+    """All USDT perps right now: index ticker, best bid / ask with sizes in coins, 24h turnover in USDT."""
+    data, _ = await retry_fetch(session, TICKERS_URL, params={"category": "linear"})
+    # linear also has USDC perps and dated futures (BTCUSDT-26DEC25), only USDT perps end with USDT
+    rows = [ticker for ticker in data["result"]["list"] if ticker["symbol"].endswith("USDT")]
+    columns = {"bid1Price": "bid", "bid1Size": "bid_size", "ask1Price": "ask", "ask1Size": "ask_size", "turnover24h": "turnover"}
+    frame = DataFrame(rows).set_index("symbol")[list(columns)].rename(columns=columns)
+    # pre-listing and halted perps come with empty prices
+    return frame.apply(to_numeric, errors="coerce").dropna().rename_axis("ticker")
 
 
 def _trades_frame(path: Path) -> DataFrame:

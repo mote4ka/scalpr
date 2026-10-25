@@ -1,9 +1,12 @@
-import aiohttp
 import json
 from pathlib import Path
+
+import aiohttp
 from scalpr_core.logger import logger
 from scalpr_core.retry import retry
+
 from scalpr_collector.progress import track
+
 
 # SESSION MANAGER CLASS
 class SessionManager:

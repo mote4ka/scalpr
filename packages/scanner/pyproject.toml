@@ -17,6 +17,8 @@ dependencies = [
 
 [project.scripts]
 scanner = "scalpr_scanner:main"
+screener = "scalpr_scanner.screener:main"
+backtest = "scalpr_scanner.backtest:main"
 
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]

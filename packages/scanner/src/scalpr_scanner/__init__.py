@@ -5,12 +5,12 @@ from datetime import date
 
 from pandas import DataFrame, Timedelta, isna
 from rich.table import Table
-from scalpr_collector.exchanges import bybit, htx
 from scalpr_collector.http_client import SessionManager
 from scalpr_core.logger import console, logger
 from scalpr_core.paths import DATA_DIR
 
 from scalpr_scanner.chart import spread_chart
+from scalpr_scanner.history import load_day
 from scalpr_scanner.maker import FILL_RULES, LABELS, maker_trades
 from scalpr_scanner.spread import (
     MODES,
@@ -25,7 +25,6 @@ from scalpr_scanner.spread import (
 from scalpr_scanner.xemm import Xemm, xemm
 
 CHARTS_DIR = DATA_DIR / "charts"
-EXCHANGES = {"bybit": bybit, "htx": htx}
 
 
 # uv run --package scalpr-scanner scanner ACEUSDT 2026-10-20 --htx maker
@@ -102,17 +101,12 @@ def main() -> None:
         webbrowser.open(path.as_uri())
 
 
-# books of both exchanges and, with a maker leg, the trades tape of the maker exchange
+# one day of history, see history.load_day
 async def load_history(ticker: str, day: date, depth: int, maker: str | None) -> tuple[DataFrame, DataFrame, DataFrame | None]:
     manager = SessionManager()
     session = await manager.getSession()
     try:
-        # all at once: downloads overlap, each gets its own progress row
-        jobs = [bybit.get_dom_history(session, ticker, day, depth), htx.get_dom_history(session, ticker, day, depth)]
-        if maker is not None:
-            jobs.append(EXCHANGES[maker].get_trades_history(session, ticker, day))
-        bybit_book, htx_book, *tape = await asyncio.gather(*jobs)
-        return bybit_book, htx_book, tape[0] if tape else None
+        return await load_day(session, ticker, day, depth, maker)
     finally:
         await manager.closeSession()
 

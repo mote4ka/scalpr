@@ -24,6 +24,10 @@ ARCHIVES = {
     "trades": ("https://futures.htx.com/data/historical_data/futures/daily/trades/{inst}/{name}", "{inst}-trades-{day}.zip"),
 }
 CONTRACT_INFO_URL = "https://api.hbdm.com/linear-swap-api/v1/swap_contract_info"
+TICKERS_URL = "https://api.hbdm.com/linear-swap-ex/market/detail/batch_merged"
+RECENT_TRADES_URL = "https://api.hbdm.com/linear-swap-ex/market/history/trade"
+# contract labels of tokenized stocks and indices (tradfi_labels covers metals and commodities too)
+TRADFI_LABELS = {"stock", "tradfi", "indices"}
 HISTORY_DIR = DATA_DIR / "history" / "htx"
 
 
@@ -71,6 +75,49 @@ async def get_trades_history(session: aiohttp.ClientSession, ticker: str, day: d
     if is_full_day:
         await asyncio.to_thread(write_parquet, frame, cached)
     return frame
+
+
+# live snapshot of every perp
+async def get_tickers(session: aiohttp.ClientSession) -> DataFrame:
+    """All trading USDT perps right now: index bybit-style ticker (ACEUSDT), best bid / ask with sizes in coins,
+    24h turnover in USDT and number of trades, price tick, tradfi (stocks, indices, metals, commodities)."""
+    (ticks, _), (contracts, _) = await asyncio.gather(
+        retry_fetch(session, TICKERS_URL, params={"business_type": "swap"}),
+        retry_fetch(session, CONTRACT_INFO_URL, params={"business_type": "swap"}),
+    )
+    # contract_status 1: trading
+    contracts = {contract["contract_code"]: contract for contract in contracts["data"] if contract["contract_status"] == 1}
+    rows = []
+    for tick in ticks["ticks"]:
+        contract = contracts.get(tick["contract_code"])
+        # an empty side of the book comes as an empty list
+        if contract is None or not tick.get("bid") or not tick.get("ask"):
+            continue
+        size = float(contract["contract_size"])
+        rows.append({
+            "ticker": tick["contract_code"].replace("-", ""),
+            "bid": float(tick["bid"][0]), "bid_size": float(tick["bid"][1]) * size,
+            "ask": float(tick["ask"][0]), "ask_size": float(tick["ask"][1]) * size,
+            "turnover": float(tick["trade_turnover"]), "trades": int(tick["count"]),
+            "tick": float(contract["price_tick"]),
+            "tradfi": bool(contract.get("tradfi_labels")) or bool(TRADFI_LABELS & set(contract.get("labels", []))),
+        })
+    return DataFrame(rows).set_index("ticker")
+
+
+# live tape
+async def get_recent_trades(session: aiohttp.ClientSession, ticker: str, size: int = 2000) -> DataFrame:
+    """Last `size` (up to 2000) trades of the USDT perp: index ts, price, size in coins, side of the taker (buy/sell).
+
+    RPI trades are left out: they fill retail-only orders that aren't in the public book.
+    """
+    contract = f"{ticker.removesuffix('USDT')}-USDT"
+    data, _ = await retry_fetch(session, RECENT_TRADES_URL, params={"contract_code": contract, "size": size})
+    trades = [trade for group in data["data"] for trade in group["data"] if not trade.get("is_rpi_trade")]
+    return DataFrame(
+        {"price": [trade["price"] for trade in trades], "size": [trade["quantity"] for trade in trades], "side": [trade["direction"] for trade in trades]},
+        index=DatetimeIndex(to_datetime([trade["ts"] for trade in trades], unit="ms", utc=True), name="ts"),
+    ).sort_index()
 
 
 # UTC day spans two UTC+8 archives, the second one appears only after 16:00 UTC of the next day
