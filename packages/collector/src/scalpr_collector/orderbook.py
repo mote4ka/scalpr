@@ -1,9 +1,12 @@
 import math
 from array import array
 from collections.abc import Iterable
+from pathlib import Path
 
 import numpy as np
-from pandas import DataFrame, to_datetime
+from pandas import DataFrame, read_parquet, to_datetime
+
+from scalpr_collector.storage import write_parquet
 
 # one book message: (ts in ms, is_snapshot, bids, asks), levels are [price, size] string pairs
 Message = tuple[int, bool, list[list[str]], list[list[str]]]
@@ -70,3 +73,20 @@ def book_frame(messages: Iterable[Message], depth: int, max_levels: int, start_m
     data = np.frombuffer(rows, dtype=np.float64).reshape(-1, 1 + 4 * depth)
     index = to_datetime(data[:, 0].astype(np.int64), unit="ms", utc=True).rename("ts")
     return DataFrame(data[:, 1:], index=index, columns=book_columns(depth))
+
+
+# PARQUET CACHE: parsed frames are stored as {stem}_d{depth}.parquet next to the archives
+# any cached depth >= requested is reused, parquet reads only the needed columns
+def load_frame(directory: Path, stem: str, depth: int) -> DataFrame | None:
+    for path in sorted(directory.glob(f"{stem}_d*.parquet"), key=_cached_depth):
+        if _cached_depth(path) >= depth:
+            return read_parquet(path, columns=book_columns(depth))
+    return None
+
+
+def save_frame(frame: DataFrame, directory: Path, stem: str, depth: int) -> Path:
+    return write_parquet(frame, directory / f"{stem}_d{depth}.parquet")
+
+
+def _cached_depth(path: Path) -> int:
+    return int(path.stem.rsplit("_d", 1)[1])

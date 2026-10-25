@@ -12,6 +12,7 @@ dependencies = [
     "aiohttp",
     "pandas",
     "numpy>=2.4.6",
+    "pyarrow>=26.0.0",
 ]
 
 [project.scripts]

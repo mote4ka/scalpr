@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from scalpr_core.logger import logger
 from scalpr_core.retry import retry
+from scalpr_collector.progress import track
 
 # SESSION MANAGER CLASS
 class SessionManager:
@@ -72,8 +73,9 @@ async def async_fetch(session: aiohttp.ClientSession, url: str, params: dict = N
 
         return data, headers
 
-# RETRY DOWNLOAD: async_download with retries
-@retry(max_retries=3)
+# RETRY DOWNLOAD: async_download with retries on network and server errors
+# missing file (FileNotFoundError) is not retried: the archive is just not published yet
+@retry(max_retries=3, exceptions=(aiohttp.ClientError, TimeoutError))
 async def retry_download(session: aiohttp.ClientSession, url: str, path: Path, timeout: int = 60) -> Path:
     return await async_download(session=session, url=url, path=path, timeout=timeout)
 
@@ -86,11 +88,14 @@ async def async_download(session: aiohttp.ClientSession, url: str, path: Path, t
     # .part first: interrupted download never looks like a finished file
     part = path.with_name(path.name + '.part')
     async with session.get(url, timeout=aiohttp.ClientTimeout(sock_read=timeout)) as response:
+        if response.status == 404:
+            raise FileNotFoundError(f'Not found: {url}')
         response.raise_for_status()
         # 1 MB chunk writes are short enough to block the loop
-        with open(part, 'wb') as file:  # noqa: ASYNC230
+        with open(part, 'wb') as file, track('download', path.name, response.content_length) as advance:  # noqa: ASYNC230
             async for chunk in response.content.iter_chunked(1 << 20):
                 file.write(chunk)
+                advance(len(chunk))
     part.replace(path)
 
     logger.debug(f'Saved {path}')
