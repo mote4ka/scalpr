@@ -7,8 +7,8 @@ from pandas import DataFrame, Series, Timedelta, Timestamp
 from scalpr_scanner.maker import Book, Tape
 from scalpr_scanner.spread import FEES
 
-FILL_COLUMNS = ["ts", "side", "price", "size", "usdt", "fair", "ahead", "hedge", "edge %", "edge 1m %", "inventory"]
-# how far after a fill the edge is measured again: the gap shows adverse selection
+FILL_COLUMNS = ["ts", "side", "price", "size", "usdt", "fair", "ahead", "hedge", "edge %", "markout 1m %", "inventory"]
+# how far after a fill it is marked again: a drop from the edge shows adverse selection
 MARKOUT = Timedelta("1min")
 
 
@@ -35,6 +35,7 @@ def xemm(spreads: DataFrame, basis: Series, native: dict[str, DataFrame], grid: 
     fair = fair.to_numpy()
     best_bid, best_ask = grid[maker]["bid"].to_numpy(), grid[maker]["ask"].to_numpy()
     maker_mid, taker_mid = grid[maker]["mid"].to_numpy(), grid[taker]["mid"].to_numpy()
+    deviation = spreads["deviation"].to_numpy()
     tick = _tick(native[maker])
     books, tape = {exchange: Book(prices) for exchange, prices in native.items()}, Tape(trades)
     hedges = books[taker]
@@ -86,9 +87,11 @@ def xemm(spreads: DataFrame, basis: Series, native: dict[str, DataFrame], grid: 
                     # alone at the best price, the taker traded with us first
                     "ahead": quote > best_bid[k] + tick / 2 if buys else quote < best_ask[k] - tick / 2,
                     "hedge": hedge,
-                    # how much better than fair we traded, now and a minute later
+                    # how much better than fair we traded
                     "edge %": sign * (fair[k] - quote) / quote * 100,
-                    "edge 1m %": sign * (fair[later] - quote) / quote * 100 if later < n else np.nan,
+                    # fill + hedge a minute later at the mids, before fees: what is locked between the two prices plus
+                    # where the htx vs bybit deviation went; the moves of the price itself are hedged away
+                    "markout 1m %": _markout(sign, quote, hedge, deviation[later], maker) if later < n else np.nan,
                     "inventory": inventory * fair[k],
                 })
         inventories[k] = inventory * fair[k] if not np.isnan(fair[k]) else np.nan
@@ -102,6 +105,13 @@ def xemm(spreads: DataFrame, basis: Series, native: dict[str, DataFrame], grid: 
     both = np.flatnonzero(~np.isnan(maker_mid + taker_mid))
     closed = _closed_pnl(cash, inventory, books, maker, taker, ts[both[-1]]) if len(both) else cash
     return Xemm(DataFrame(fills, columns=FILL_COLUMNS), curve, closed, fees)
+
+
+# value of a fill and its hedge, % of the fill price: sign 1 is long on the maker exchange, short on the other
+# with the maker on htx: (hedge / quote - 1) + htx vs bybit deviation; on bybit the deviation counts the other way
+def _markout(sign: int, quote: float, hedge: float, deviation: float, maker: str) -> float:
+    maker_premium = deviation if maker == "htx" else -deviation
+    return sign * ((hedge / quote - 1) * 100 + maker_premium)
 
 
 # how much of our resting order a taker print fills, `buys`: ours is a bid hit by a taker sell

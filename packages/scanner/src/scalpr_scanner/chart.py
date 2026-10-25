@@ -86,8 +86,8 @@ def _add_market_making(figure: go.Figure, result: Xemm) -> None:
         figure.add_trace(go.Scatter(
             x=part["ts"], y=part["price"], mode="markers", name=f"we {side}",
             marker={"symbol": symbol, "size": 8, "color": color},
-            text=[f"{side} {usdt:.0f} USDT, edge {now:+.3f}%, 1m later {later:+.3f}%"
-                  for usdt, now, later in zip(part["usdt"], part["edge %"], part["edge 1m %"], strict=True)],
+            text=[f"{side} {usdt:.0f} USDT, edge {now:+.3f}%, markout 1m {later:+.3f}%"
+                  for usdt, now, later in zip(part["usdt"], part["edge %"], part["markout 1m %"], strict=True)],
             hoverinfo="text",
         ), row=1, col=1)
     figure.add_trace(go.Scattergl(x=curve.index, y=curve["pnl"], name="pnl, USDT", line={"width": 1.5, "color": BUY_COLOR}), row=3, col=1)

@@ -98,7 +98,7 @@ def summary(ticker: str, day: date, edge: float, coverage: float, result: Xemm) 
         "coverage": coverage,
         "fills": len(fills),
         "volume": fills["usdt"].sum(),
-        "edge 1m %": fills["edge 1m %"].median(),
+        "markout 1m %": fills["markout 1m %"].median(),
         "fees": result.fees,
         "pnl marked": curve["pnl"].iloc[-1],
         # every day ends flat: inventory closed with taker orders
@@ -114,7 +114,7 @@ def print_results(results: DataFrame, days: int) -> None:
     else:
         per = done.groupby(["ticker", "edge"]).agg(
             days=("day", "nunique"), pnl=("pnl", "sum"), win_days=("pnl", lambda pnl: (pnl > 0).sum()),
-            volume=("volume", "sum"), fills=("fills", "sum"), edge_1m=("edge 1m %", "median"),
+            volume=("volume", "sum"), fills=("fills", "sum"), markout=("markout 1m %", "median"),
             max_inventory=("max inventory", "max"), coverage=("coverage", "mean"),
         )
         grid = per["pnl"].unstack("edge")
@@ -123,7 +123,7 @@ def print_results(results: DataFrame, days: int) -> None:
 
         table = Table(title=f"XEMM backtest: P&L in USDT closed every day, sum over up to {days} days")
         for column in ("ticker", *(f"edge {edge:g}%" for edge in grid.columns), "best edge", "days", "win days", "pnl/day",
-                       "volume/day", "fills/day", "edge 1m", "max inventory", "coverage"):
+                       "volume/day", "fills/day", "markout 1m", "max inventory", "coverage"):
             table.add_column(column, justify="right")
         for ticker, row in best.iterrows():
             # iterrows makes the row float, counts go back to int
@@ -137,7 +137,7 @@ def print_results(results: DataFrame, days: int) -> None:
                 f"{row['pnl'] / row['days']:+.2f}",
                 f"{row['volume'] / row['days']:,.0f}",
                 f"{row['fills'] / row['days']:.0f}",
-                f"{row['edge_1m']:+.3f}",
+                f"{row['markout']:+.3f}",
                 f"{row['max_inventory']:.0f}",
                 f"{row['coverage']:.0%}",
             )

@@ -233,7 +233,7 @@ def print_market_making(result: Xemm, maker: str, edge: float, max_position: flo
     fills, curve = result.fills, result.curve
     volume = fills["usdt"].sum()
     summary = Table(title=f"Market making on {LABELS[maker]}: quotes {edge}% from fair, max inventory {max_position:g} USDT, {rule} fills")
-    columns = ("fills buy / sell", "volume, USDT", "ahead of book", "both sides quoted", "edge, median %", "edge 1m later, median %",
+    columns = ("fills buy / sell", "volume, USDT", "ahead of book", "both sides quoted", "edge, median %", "markout 1m, median %",
                "fees, USDT", "pnl marked, USDT", "pnl closed, USDT", "per 1k volume", "max inventory", "end inventory")
     for column in columns:
         summary.add_column(column, justify="right")
@@ -243,7 +243,7 @@ def print_market_making(result: Xemm, maker: str, edge: float, max_position: flo
         f"{fills['ahead'].mean():.0%}" if len(fills) else "-",
         f"{(curve['bid'].notna() & curve['ask'].notna()).mean():.0%}",
         _percent(fills["edge %"].median()),
-        _percent(fills["edge 1m %"].median()),
+        _percent(fills["markout 1m %"].median()),
         f"{result.fees:.2f}",
         f"{curve['pnl'].iloc[-1]:+.2f}",
         f"{result.closed_pnl:+.2f}",
@@ -256,7 +256,7 @@ def print_market_making(result: Xemm, maker: str, edge: float, max_position: flo
         return
 
     first = Table(title=f"First {top_rows} fills")
-    for column in ("time", "side", "price", "USDT", "fair", "ahead", "hedge", "edge %", "edge 1m %", "inventory"):
+    for column in ("time", "side", "price", "USDT", "fair", "ahead", "hedge", "edge %", "markout 1m %", "inventory"):
         first.add_column(column, justify="right")
     for _, row in fills.head(top_rows).iterrows():
         first.add_row(
@@ -268,7 +268,7 @@ def print_market_making(result: Xemm, maker: str, edge: float, max_position: flo
             "yes" if row["ahead"] else "no",
             f"{row['hedge']:.6g}",
             _percent(row["edge %"]),
-            _percent(row["edge 1m %"]),
+            _percent(row["markout 1m %"]),
             f"{row['inventory']:+.0f}",
         )
     console.print(first)
