@@ -22,6 +22,7 @@ from scalpr_scanner.spread import (
     spread_frame,
     windows,
 )
+from scalpr_scanner.xemm import Xemm, xemm
 
 CHARTS_DIR = DATA_DIR / "charts"
 EXCHANGES = {"bybit": bybit, "htx": htx}
@@ -43,6 +44,10 @@ def main() -> None:
     parser.add_argument("--fill", choices=FILL_RULES, default="through", help="maker order is filled by a trade past its price (through, default) or at it (touch)")
     parser.add_argument("--exit-timeout", default="5min", help="maker exit order not filled in this time is closed with a taker order (default 5min)")
     parser.add_argument("--latency", default="0ms", help="delay from a maker fill to the hedge order (default 0ms)")
+    parser.add_argument("--strategy", choices=("basis", "xemm"), default="basis",
+                        help="basis: trade the return to the basis; xemm: quote one exchange all the time and hedge every fill on the other (default basis)")
+    parser.add_argument("--edge", type=float, default=0.25, help="xemm: quotes are this %% away from the fair price (default 0.25)")
+    parser.add_argument("--max-position", type=float, default=300, help="xemm: a side stops quoting at this inventory in USDT (default 300)")
     parser.add_argument("--top", type=int, default=10, help="rows in the windows and trades lists (default 10)")
     parser.add_argument("--no-open", action="store_true", help="only save the chart, don't open it in the browser")
     args = parser.parse_args()
@@ -52,32 +57,46 @@ def main() -> None:
     if len(makers) > 1:
         parser.error("maker on both exchanges leaves legs unhedged: quote on one exchange, hedge with taker on the other")
     maker = makers[0] if makers else None
+    if args.strategy == "xemm":
+        # market making quotes one exchange: HTX unless Bybit is set as the maker
+        maker = maker or "htx"
+        modes[maker] = "maker"
 
-    fees = args.fees if args.fees is not None else round_trip_fees(modes)
     bybit_book, htx_book, tape = asyncio.run(load_history(args.ticker, args.day, args.depth, maker))
     native, grid = exchange_prices(bybit_book, htx_book, args.day, args.notional, args.freq)
     spreads = spread_frame(grid)
-    # taker legs pay their exchange's spread on entry and exit, a maker leg doesn't cross it
-    cost = sum(crossing_cost(grid[exchange]) for exchange, mode in modes.items() if mode == "taker")
-    # the deviation has to move at least as much as a round trip costs
-    entry = args.entry if args.entry is not None else fees + cost
-    logger.info(f"Bybit {args.bybit}, HTX {args.htx}: round trip fees {fees:.3f}%, crossing cost {cost:.3f}%, entry {entry:.3f}% from basis")
-
-    taker_fees = round_trip_fees(dict.fromkeys(modes, "taker"))
-    print_windows(spreads, windows(spreads, taker_fees), taker_fees, args.top)
     basis_line = basis(spreads, args.basis_window)
-    if maker is None:
-        trades = basis_trades(spreads, basis_line, entry, fees)
-        print_trades(trades, entry, args.basis_window, args.top)
-    else:
-        trades = maker_trades(spreads, basis_line, entry, native, tape, maker, args.fill, args.exit_timeout, args.latency)
-        print_maker_trades(trades, entry, args.basis_window, maker, args.fill, args.top)
-        trades = trades.dropna(subset=["entry"])
 
-    title = f"{args.ticker} {args.day} UTC: HTX vs Bybit, Bybit {args.bybit} / HTX {args.htx}"
-    path = CHARTS_DIR / f"{args.ticker}_{args.day}_{args.bybit}-{args.htx}.html"
+    if args.strategy == "xemm":
+        hedge_on = "bybit" if maker == "htx" else "htx"
+        result = xemm(spreads, basis_line, native, grid, tape, maker, args.notional, args.edge, args.max_position, args.fill, args.latency)
+        print_market_making(result, maker, args.edge, args.max_position, args.fill, args.top)
+        title = f"{args.ticker} {args.day} UTC: market making on {LABELS[maker]} {args.edge}% from fair, hedge on {LABELS[hedge_on]}"
+        path = CHARTS_DIR / f"{args.ticker}_{args.day}_xemm-{maker}.html"
+        figure = spread_chart(spreads, title, basis_line, args.edge, market_making=result)
+    else:
+        fees = args.fees if args.fees is not None else round_trip_fees(modes)
+        # taker legs pay their exchange's spread on entry and exit, a maker leg doesn't cross it
+        cost = sum(crossing_cost(grid[exchange]) for exchange, mode in modes.items() if mode == "taker")
+        # the deviation has to move at least as much as a round trip costs
+        entry = args.entry if args.entry is not None else fees + cost
+        logger.info(f"Bybit {args.bybit}, HTX {args.htx}: round trip fees {fees:.3f}%, crossing cost {cost:.3f}%, entry {entry:.3f}% from basis")
+
+        taker_fees = round_trip_fees(dict.fromkeys(modes, "taker"))
+        print_windows(spreads, windows(spreads, taker_fees), taker_fees, args.top)
+        if maker is None:
+            trades = basis_trades(spreads, basis_line, entry, fees)
+            print_trades(trades, entry, args.basis_window, args.top)
+        else:
+            trades = maker_trades(spreads, basis_line, entry, native, tape, maker, args.fill, args.exit_timeout, args.latency)
+            print_maker_trades(trades, entry, args.basis_window, maker, args.fill, args.top)
+            trades = trades.dropna(subset=["entry"])
+        title = f"{args.ticker} {args.day} UTC: HTX vs Bybit, Bybit {args.bybit} / HTX {args.htx}"
+        path = CHARTS_DIR / f"{args.ticker}_{args.day}_{args.bybit}-{args.htx}.html"
+        figure = spread_chart(spreads, title, basis_line, entry, trades=trades)
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    spread_chart(spreads, title, basis_line, entry, trades).write_html(path)
+    figure.write_html(path)
     logger.info(f"Chart saved to {path}")
     if not args.no_open:
         webbrowser.open(path.as_uri())
@@ -214,6 +233,51 @@ def print_maker_trades(trades: DataFrame, entry: float, window: str, maker: str,
             _percent(row["pnl %"]),
         )
     console.print(top)
+
+
+def print_market_making(result: Xemm, maker: str, edge: float, max_position: float, rule: str, top_rows: int) -> None:
+    fills, curve = result.fills, result.curve
+    volume = fills["usdt"].sum()
+    summary = Table(title=f"Market making on {LABELS[maker]}: quotes {edge}% from fair, max inventory {max_position:g} USDT, {rule} fills")
+    columns = ("fills buy / sell", "volume, USDT", "ahead of book", "both sides quoted", "edge, median %", "edge 1m later, median %",
+               "fees, USDT", "pnl marked, USDT", "pnl closed, USDT", "per 1k volume", "max inventory", "end inventory")
+    for column in columns:
+        summary.add_column(column, justify="right")
+    summary.add_row(
+        f"{(fills['side'] == 'buy').sum()} / {(fills['side'] == 'sell').sum()}",
+        f"{volume:,.0f}",
+        f"{fills['ahead'].mean():.0%}" if len(fills) else "-",
+        f"{(curve['bid'].notna() & curve['ask'].notna()).mean():.0%}",
+        _percent(fills["edge %"].median()),
+        _percent(fills["edge 1m %"].median()),
+        f"{result.fees:.2f}",
+        f"{curve['pnl'].iloc[-1]:+.2f}",
+        f"{result.closed_pnl:+.2f}",
+        f"{result.closed_pnl / volume * 1000:+.2f}" if volume else "-",
+        f"{curve['inventory'].abs().max():.0f}",
+        f"{curve['inventory'].iloc[-1]:+.0f}",
+    )
+    console.print(summary)
+    if fills.empty:
+        return
+
+    first = Table(title=f"First {top_rows} fills")
+    for column in ("time", "side", "price", "USDT", "fair", "ahead", "hedge", "edge %", "edge 1m %", "inventory"):
+        first.add_column(column, justify="right")
+    for _, row in fills.head(top_rows).iterrows():
+        first.add_row(
+            row["ts"].strftime("%H:%M:%S"),
+            row["side"],
+            f"{row['price']:.6g}",
+            f"{row['usdt']:.1f}",
+            f"{row['fair']:.6g}",
+            "yes" if row["ahead"] else "no",
+            f"{row['hedge']:.6g}",
+            _percent(row["edge %"]),
+            _percent(row["edge 1m %"]),
+            f"{row['inventory']:+.0f}",
+        )
+    console.print(first)
 
 
 # "00:03:42", "-" when it didn't happen before the data ends

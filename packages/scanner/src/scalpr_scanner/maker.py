@@ -11,7 +11,7 @@ DATA_END_TOLERANCE = Timedelta("1min").value
 
 
 # BOOK: native prices of one exchange with as-of lookups at any moment (ns timestamps)
-class _Book:
+class Book:
     def __init__(self, prices: DataFrame):
         self.ts = prices.index.as_unit("ns").asi8
         self.columns = {column: prices[column].to_numpy() for column in prices.columns}
@@ -24,10 +24,11 @@ class _Book:
 
 
 # TRADES: tape of the maker exchange, tells when a resting limit order would have been filled
-class _Tape:
+class Tape:
     def __init__(self, trades: DataFrame):
         self.ts = trades.index.as_unit("ns").asi8
         self.price = trades["price"].to_numpy()
+        self.size = trades["size"].to_numpy()
         self.taker_sells = (trades["side"] == "sell").to_numpy()
 
     # first fill in (start, end) of a maker order at `price`: a maker buy is hit by taker sells, a sell by taker buys
@@ -46,15 +47,15 @@ class _Tape:
 
 # MAKER TRADES: basis reversion where `maker` exchange quotes and the other one hedges with taker orders
 # entry: when the deviation leaves the basis by more than `entry` %, a limit order rests at the maker exchange's best
-#   price on our side; it is filled only by a trade from the tape (see _Tape.first_fill) while the signal lasts,
+#   price on our side; it is filled only by a trade from the tape (see Tape.first_fill) while the signal lasts,
 #   otherwise it is cancelled; after the fill the other exchange is hit with a taker order `latency` later
 # exit: back at the basis a limit order closes the maker leg the same way; with no fill in `exit_timeout` the maker
 #   leg is closed with a taker order; the hedge is always closed with a taker order
 def maker_trades(spreads: DataFrame, basis: Series, entry: float, native: dict[str, DataFrame], trades: DataFrame,
                  maker: str, rule: str, exit_timeout: str, latency: str) -> DataFrame:
     taker = "htx" if maker == "bybit" else "bybit"
-    books = {exchange: _Book(prices) for exchange, prices in native.items()}
-    tape = _Tape(trades)
+    books = {exchange: Book(prices) for exchange, prices in native.items()}
+    tape = Tape(trades)
     grid = spreads.index.as_unit("ns").asi8
     step = grid[1] - grid[0]
     excess = (spreads["deviation"] - basis).to_numpy()
