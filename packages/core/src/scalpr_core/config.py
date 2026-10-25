@@ -8,3 +8,5 @@ load_dotenv()
 RICH_TRACEBACK_ENABLE = False
 
 # APIS
+BYBIT_API = os.getenv("BYBIT_API")
+HTX_API = os.getenv("HTX_API")

@@ -100,7 +100,7 @@ consoleHandler.addFilter(ConsoleFilter())
     
     
 # file handler
-from orakul_core.paths import LOGS_DIR
+from scalpr_core.paths import LOGS_DIR
 fileHandler = logging.FileHandler(LOGS_DIR / "latest.log" ,mode='w', encoding="utf-8") # replace to filename from constants.py
 fileHandler.setFormatter(logging.Formatter(
     fmt="[%(asctime)s:%(msecs)03d] [%(levelname)s]: - %(name)s - %(message)s (%(filename)s:%(lineno)d)",

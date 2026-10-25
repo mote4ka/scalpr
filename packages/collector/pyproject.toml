@@ -9,6 +9,9 @@ authors = [
 requires-python = ">=3.11"
 dependencies = [
     "scalpr-core",
+    "aiohttp",
+    "pandas",
+    "numpy>=2.4.6",
 ]
 
 [project.scripts]
