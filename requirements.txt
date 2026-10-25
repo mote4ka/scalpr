@@ -1,8 +1,0 @@
-websockets
-requests
-asyncio
-aiohttp
-rich
-mplfinance
-plotly
-nbformat
