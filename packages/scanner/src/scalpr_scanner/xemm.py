@@ -1,4 +1,3 @@
-import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -43,21 +42,41 @@ def xemm(spreads: DataFrame, basis: Series, native: dict[str, DataFrame], grid: 
     step, delay, markout = ts[1] - ts[0], Timedelta(latency).value, MARKOUT.value
     n = len(ts)
 
+    # quotes of every step on the tick grid; stay a maker: a quote over the other side of the book would be a taker order
+    quoting = ~np.isnan(fair + best_bid + best_ask)
+    with np.errstate(invalid="ignore"):
+        quote_bids = np.minimum(np.floor(fair * (1 - edge / 100) / tick) * tick, best_ask - tick)
+        quote_asks = np.maximum(np.ceil(fair * (1 + edge / 100) / tick) * tick, best_bid + tick)
+    # step k takes the trades in (ts[k], ts[k] + step]
+    trade_steps = np.searchsorted(ts, tape.ts, side="left") - 1
+    in_day = (trade_steps >= 0) & (tape.ts <= ts[-1] + step)
+
     inventory = cash = fees = 0.0  # inventory in coins on the maker exchange, the hedge holds the opposite
     bids, asks, inventories, pnl = (np.full(n, np.nan) for _ in range(4))
     fills = []
-    for k in range(n):
-        if not np.isnan(fair[k] + best_bid[k] + best_ask[k]):
-            bid = math.floor(fair[k] * (1 - edge / 100) / tick) * tick
-            ask = math.ceil(fair[k] * (1 + edge / 100) / tick) * tick
-            # stay a maker: a quote over the other side of the book would be a taker order
-            bid, ask = min(bid, best_ask[k] - tick), max(ask, best_bid[k] + tick)
+
+    # between steps with trades nothing changes but the prices: those stretches are filled at once
+    def carry(start: int, end: int) -> None:
+        with np.errstate(invalid="ignore"):
+            exposure = inventory * fair[start:end]
+            bids[start:end] = np.where(quoting[start:end] & (exposure < max_position), quote_bids[start:end], np.nan)
+            asks[start:end] = np.where(quoting[start:end] & (-exposure < max_position), quote_asks[start:end], np.nan)
+            inventories[start:end] = exposure
+            # maker leg at its mid, the hedge at the other mid
+            pnl[start:end] = cash + inventory * (maker_mid[start:end] - taker_mid[start:end])
+
+    done = 0
+    # the tape is sorted, so are its steps: the trades of a step are one slice of it
+    steps = np.unique(trade_steps[in_day])
+    for k, first, last in zip(steps, np.searchsorted(trade_steps, steps, "left"), np.searchsorted(trade_steps, steps, "right"), strict=True):
+        carry(done, k + 1)  # step k is quoted with the inventory it starts with
+        if quoting[k]:
+            bid, ask = quote_bids[k], quote_asks[k]
             bid_left = notional / bid if inventory * fair[k] < max_position else 0.0
             ask_left = notional / ask if -inventory * fair[k] < max_position else 0.0
-            bids[k], asks[k] = (bid if bid_left else np.nan), (ask if ask_left else np.nan)
-
-            first, last = np.searchsorted(tape.ts, ts[k], side="right"), np.searchsorted(tape.ts, ts[k] + step, side="right")
             for j in range(first, last):
+                if not in_day[j]:
+                    continue
                 buys = bool(tape.taker_sells[j])  # a taker sell hits our bid
                 quote, left = (bid, bid_left) if buys else (ask, ask_left)
                 qty = _filled(tape.price[j], tape.size[j], quote, best_bid[k] if buys else best_ask[k], left, buys, rule, tick) if left else 0.0
@@ -94,9 +113,10 @@ def xemm(spreads: DataFrame, basis: Series, native: dict[str, DataFrame], grid: 
                     "markout 1m %": _markout(sign, quote, hedge, deviation[later], maker) if later < n else np.nan,
                     "inventory": inventory * fair[k],
                 })
-        inventories[k] = inventory * fair[k] if not np.isnan(fair[k]) else np.nan
-        # maker leg at its mid, the hedge at the other mid
+        inventories[k] = inventory * fair[k]
         pnl[k] = cash + inventory * (maker_mid[k] - taker_mid[k])
+        done = k + 1
+    carry(done, n)
 
     curve = DataFrame({"bid": bids, "ask": asks, "inventory": inventories, "pnl": pnl}, index=spreads.index)
     # carry the last value over gaps in the data

@@ -22,7 +22,7 @@ BACKTESTS_DIR = DATA_DIR / "backtests"
 PUBLISH_LAG = timedelta(days=2)
 
 
-# uv run --package scalpr-scanner backtest --top 10 --days 3 --edges 0.1,0.15,0.2,0.25
+# uv run --package scalpr-scanner backtest --top 10 --days 10 --edges 0.1,0.2,0.3,0.5 --latencies 0ms,200ms --walk-forward 3
 def main() -> None:
     parser = argparse.ArgumentParser(description="XEMM on HTX with a Bybit hedge over several coins, days and edges")
     parser.add_argument("--tickers", help="comma separated bybit-style tickers, default: top candidates of the last screen")
@@ -35,12 +35,14 @@ def main() -> None:
     parser.add_argument("--notional", type=float, default=100, help="quote size in USDT (default 100)")
     parser.add_argument("--max-position", type=float, default=300, help="a side stops quoting at this inventory in USDT (default 300)")
     parser.add_argument("--fill", choices=FILL_RULES, default="through", help="fill rule when our quote is level with the book (default through)")
-    parser.add_argument("--latency", default="0ms", help="delay from a fill to the hedge (default 0ms)")
+    parser.add_argument("--latencies", default="0ms", help="delays from a fill to the hedge, comma separated (default 0ms)")
     parser.add_argument("--depth", type=int, default=20, help="book levels to load (default 20)")
     parser.add_argument("--freq", default="1s", help="quote refresh step (default 1s)")
     parser.add_argument("--basis-window", default="1h", help="rolling window of the basis (default 1h)")
     parser.add_argument("--train-until", type=date.fromisoformat,
                         help="out of sample check: pick each coin's edge on the days up to this one, trade it on the later days")
+    parser.add_argument("--walk-forward", type=int, metavar="DAYS",
+                        help="walk forward check: trade every day with the edge picked on the DAYS days before it")
     parser.add_argument("--results", type=Path, help="print a saved results parquet instead of simulating again")
     args = parser.parse_args()
 
@@ -50,14 +52,28 @@ def main() -> None:
         tickers = args.tickers.split(",") if args.tickers else top_candidates(args.screen, args.top)
         days = [args.last_day - timedelta(days=back) for back in reversed(range(args.days))]
         edges = [float(edge) for edge in args.edges.split(",")]
-        logger.info(f"{len(tickers)} coins x {len(days)} days ({days[0]} .. {days[-1]}) x edges {edges}")
-        results = asyncio.run(run(tickers, days, edges, args))
+        latencies = args.latencies.split(",")
+        logger.info(f"{len(tickers)} coins x {len(days)} days ({days[0]} .. {days[-1]}) x edges {edges} x hedge latencies {latencies}")
+        results = asyncio.run(run(tickers, days, edges, latencies, args))
         path = BACKTESTS_DIR / f"{datetime.now(UTC):%Y-%m-%d_%H%M}.parquet"
         write_parquet(results, path)
         logger.info(f"Results saved to {path}")
-    print_results(results, results["day"].nunique())
-    if args.train_until:
-        print_out_of_sample(results, args.train_until)
+    if "latency" not in results:
+        # runs saved before latencies were a column all used 0ms
+        results["latency"] = "0ms"
+
+    totals = []
+    # latency is NaN on skipped coin-days, they are reported once at the end
+    for latency in results["latency"].dropna().unique():
+        part = results[results["latency"] == latency]
+        totals.append({"latency": latency, **print_results(part, latency)})
+        if args.train_until:
+            print_out_of_sample(part, args.train_until)
+        if args.walk_forward:
+            totals[-1].update(print_walk_forward(part, args.walk_forward, latency))
+    if len(totals) > 1:
+        print_totals(DataFrame(totals))
+    print_skipped(results)
 
 
 def top_candidates(screen_path: Path | None, top: int) -> list[str]:
@@ -70,7 +86,7 @@ def top_candidates(screen_path: Path | None, top: int) -> list[str]:
 
 
 # one coin-day at a time: a day of books takes hundreds of MB, they are dropped before the next one
-async def run(tickers: list[str], days: list[date], edges: list[float], args: argparse.Namespace) -> DataFrame:
+async def run(tickers: list[str], days: list[date], edges: list[float], latencies: list[str], args: argparse.Namespace) -> DataFrame:
     manager = SessionManager()
     session = await manager.getSession()
     rows = []
@@ -88,9 +104,9 @@ async def run(tickers: list[str], days: list[date], edges: list[float], args: ar
             basis_line = basis(spreads, args.basis_window)
             # share of the day both books are there (a partial htx day is shorter)
             coverage = (grid["bybit"]["mid"].notna() & grid["htx"]["mid"].notna()).mean()
-            for edge in edges:
-                result = xemm(spreads, basis_line, native, grid, tape, "htx", args.notional, edge, args.max_position, args.fill, args.latency)
-                rows.append(summary(ticker, day, edge, coverage, result))
+            for latency, edge in product(latencies, edges):
+                result = xemm(spreads, basis_line, native, grid, tape, "htx", args.notional, edge, args.max_position, args.fill, latency)
+                rows.append({"latency": latency, **summary(ticker, day, edge, coverage, result)})
     finally:
         await manager.closeSession()
     return DataFrame(rows)
@@ -114,41 +130,46 @@ def summary(ticker: str, day: date, edge: float, coverage: float, result: Xemm) 
     }
 
 
-def print_results(results: DataFrame, days: int) -> None:
+# per coin and edge over all days; returns the pnl per day of every coin at its best edge, summed
+def print_results(results: DataFrame, latency: str) -> dict:
     done = results.dropna(subset=["pnl"]) if "pnl" in results else results.iloc[0:0]
     if done.empty:
         console.print("[red]nothing simulated[/]")
-    else:
-        per = done.groupby(["ticker", "edge"]).agg(
-            days=("day", "nunique"), pnl=("pnl", "sum"), win_days=("pnl", lambda pnl: (pnl > 0).sum()),
-            volume=("volume", "sum"), fills=("fills", "sum"), markout=("markout 1m %", "median"),
-            max_inventory=("max inventory", "max"), coverage=("coverage", "mean"),
-        )
-        grid = per["pnl"].unstack("edge")
-        # the edge with the most pnl for every coin, best coins first
-        best = per.loc[per.groupby(level="ticker")["pnl"].idxmax()].reset_index(level="edge").sort_values("pnl", ascending=False)
+        return {}
+    per = done.groupby(["ticker", "edge"]).agg(
+        days=("day", "nunique"), pnl=("pnl", "sum"), win_days=("pnl", lambda pnl: (pnl > 0).sum()),
+        volume=("volume", "sum"), fills=("fills", "sum"), markout=("markout 1m %", "median"),
+        max_inventory=("max inventory", "max"), coverage=("coverage", "mean"),
+    )
+    grid = per["pnl"].unstack("edge")
+    # the edge with the most pnl for every coin, best coins first
+    best = per.loc[per.groupby(level="ticker")["pnl"].idxmax()].reset_index(level="edge").sort_values("pnl", ascending=False)
 
-        table = Table(title=f"XEMM backtest: P&L in USDT closed every day, sum over up to {days} days")
-        for column in ("ticker", *(f"edge {edge:g}%" for edge in grid.columns), "best edge", "days", "win days", "pnl/day",
-                       "volume/day", "fills/day", "markout 1m", "max inventory", "coverage"):
-            table.add_column(column, justify="right")
-        for ticker, row in best.iterrows():
-            # iterrows makes the row float, counts go back to int
-            days_done, win_days = int(row["days"]), int(row["win_days"])
-            table.add_row(
-                ticker,
-                *(f"{pnl:+.2f}" for pnl in grid.loc[ticker]),
-                f"{row['edge']:g}%",
-                str(days_done),
-                f"{win_days} / {days_done}",
-                f"{row['pnl'] / row['days']:+.2f}",
-                f"{row['volume'] / row['days']:,.0f}",
-                f"{row['fills'] / row['days']:.0f}",
-                f"{row['markout']:+.3f}",
-                f"{row['max_inventory']:.0f}",
-                f"{row['coverage']:.0%}",
-            )
-        console.print(table)
+    table = Table(title=f"XEMM backtest, hedge latency {latency}: P&L in USDT closed every day, sum over up to {done['day'].nunique()} days")
+    for column in ("ticker", *(f"edge {edge:g}%" for edge in grid.columns), "best edge", "days", "win days", "pnl/day",
+                   "volume/day", "fills/day", "markout 1m", "max inventory", "coverage"):
+        table.add_column(column, justify="right")
+    for ticker, row in best.iterrows():
+        # iterrows makes the row float, counts go back to int
+        days_done, win_days = int(row["days"]), int(row["win_days"])
+        table.add_row(
+            ticker,
+            *(f"{pnl:+.2f}" for pnl in grid.loc[ticker]),
+            f"{row['edge']:g}%",
+            str(days_done),
+            f"{win_days} / {days_done}",
+            f"{row['pnl'] / row['days']:+.2f}",
+            f"{row['volume'] / row['days']:,.0f}",
+            f"{row['fills'] / row['days']:.0f}",
+            f"{row['markout']:+.3f}",
+            f"{row['max_inventory']:.0f}",
+            f"{row['coverage']:.0%}",
+        )
+    console.print(table)
+    return {"best in sample/day": (best["pnl"] / best["days"]).clip(lower=0).sum()}
+
+
+def print_skipped(results: DataFrame) -> None:
     if "error" in results:
         for _, row in results.dropna(subset=["error"]).iterrows():
             console.print(f"[yellow]skipped {row['ticker']} {row['day']}: {row['error']}[/]")
@@ -199,4 +220,61 @@ def print_out_of_sample(results: DataFrame, train_until: date) -> None:
         f"{len(traded)} traded", "", f"{traded['train/day'].sum():+.2f}", "", f"{traded['test/day'].sum():+.2f}", "", "",
         f"{table_rows['hindsight/day'].clip(lower=0).sum():+.2f}",
     )
+    console.print(table)
+
+
+# WALK FORWARD: from the (window + 1)-th day of a coin on, every day is traded with the edge that made the most over
+# the `window` days before it, and only if it made money there; hindsight is the best single edge over those
+# same traded days, picked after the fact
+def print_walk_forward(results: DataFrame, window: int, latency: str) -> dict:
+    done = results.dropna(subset=["pnl"]) if "pnl" in results else results.iloc[0:0]
+    daily = done.pivot_table(index=["ticker", "day"], columns="edge", values="pnl")
+    rows = []
+    for ticker, days in daily.groupby(level="ticker"):
+        days = days.droplevel("ticker").sort_index()
+        for i in range(window, len(days)):
+            train = days.iloc[i - window:i].sum()
+            edge = train.idxmax()
+            traded = train[edge] > 0
+            rows.append({"ticker": ticker, "day": days.index[i], "edge": edge, "traded": traded, "pnl": days.iloc[i][edge] if traded else 0.0})
+    if not rows:
+        console.print(f"[red]walk forward needs more than {window} days per coin[/]")
+        return {}
+    walk = DataFrame(rows)
+
+    table = Table(title=f"Walk forward, hedge latency {latency}: edge picked on the {window} days before each day (pnl per day, USDT)")
+    for column in ("ticker", "test days", "traded", "win days", "edges used", "pnl/day", "hindsight edge", "hindsight/day"):
+        table.add_column(column, justify="right")
+    summaries = []
+    for ticker, part in walk.groupby("ticker"):
+        tested = daily.loc[ticker].loc[part["day"]].sum()
+        traded = part[part["traded"]]
+        summaries.append({
+            "ticker": ticker, "days": len(part), "traded": len(traded), "wins": int((traded["pnl"] > 0).sum()),
+            "edges": ", ".join(f"{edge:g}" for edge in sorted(traded["edge"].unique())) or "-",
+            "pnl/day": part["pnl"].sum() / len(part),
+            "hindsight edge": tested.idxmax(), "hindsight/day": max(tested.max(), 0) / len(part),
+        })
+    summaries = DataFrame(summaries).sort_values("pnl/day", ascending=False)
+    for _, row in summaries.iterrows():
+        table.add_row(
+            row["ticker"], str(row["days"]), str(row["traded"]), f"{row['wins']} / {row['traded']}", row["edges"],
+            f"{row['pnl/day']:+.2f}", f"{row['hindsight edge']:g}%", f"{row['hindsight/day']:+.2f}",
+        )
+    table.add_section()
+    table.add_row(
+        "total", str(summaries["days"].sum()), str(summaries["traded"].sum()), f"{summaries['wins'].sum()} / {summaries['traded'].sum()}", "",
+        f"{summaries['pnl/day'].sum():+.2f}", "", f"{summaries['hindsight/day'].sum():+.2f}",
+    )
+    console.print(table)
+    return {"walk forward/day": summaries["pnl/day"].sum(), "hindsight/day": summaries["hindsight/day"].sum(),
+            "coin-days won": f"{summaries['wins'].sum()} / {summaries['traded'].sum()}"}
+
+
+def print_totals(totals: DataFrame) -> None:
+    table = Table(title="By hedge latency: pnl per day of all coins, USDT")
+    for column in totals.columns:
+        table.add_column(column, justify="right")
+    for _, row in totals.iterrows():
+        table.add_row(*(f"{value:+.2f}" if isinstance(value, float) else str(value) for value in row))
     console.print(table)
