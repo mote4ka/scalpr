@@ -5,6 +5,7 @@ import statistics
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from rich.live import Live
 from rich.table import Table
@@ -13,7 +14,7 @@ from scalpr_core.logger import console, logger
 from scalpr_collector.exchanges import htx as htx_rest
 from scalpr_collector.http_client import SessionManager
 from scalpr_collector.realtime.bybit import BybitFeed
-from scalpr_collector.realtime.events import BookEvent, Event
+from scalpr_collector.realtime.events import BookEvent, Event, HeartbeatEvent
 from scalpr_collector.realtime.feed import Feed
 from scalpr_collector.realtime.htx import HtxFeed
 from scalpr_collector.realtime.recorder import STREAM_DIR, Recorder
@@ -27,17 +28,18 @@ def main() -> None:
     parser.add_argument("--htx-depth", type=int, default=20, help="htx book levels: 20 (default) or 150")
     parser.add_argument("--minutes", type=float, default=0, help="stop after this long (default 0: until Ctrl+C)")
     parser.add_argument("--no-record", action="store_true", help="only show the feeds, don't write data/stream")
+    parser.add_argument("--out", type=Path, default=STREAM_DIR, help="folder to record to (default data/stream)")
     args = parser.parse_args()
     try:
-        asyncio.run(stream(args.tickers.split(","), args.bybit_depth, args.htx_depth, args.minutes, not args.no_record))
+        asyncio.run(stream(args.tickers.split(","), args.bybit_depth, args.htx_depth, args.minutes, None if args.no_record else args.out))
     except KeyboardInterrupt:
         logger.info("Stopped")
 
 
-async def stream(tickers: list[str], bybit_depth: int, htx_depth: int, minutes: float, record: bool) -> None:
+async def stream(tickers: list[str], bybit_depth: int, htx_depth: int, minutes: float, out: Path | None) -> None:
     manager = SessionManager()
     session = await manager.getSession()
-    recorder = Recorder() if record else None
+    recorder = Recorder(out) if out is not None else None
     tasks: list[asyncio.Task] = []
     try:
         contract_sizes = await htx_rest.get_contract_sizes(session)
@@ -48,7 +50,7 @@ async def stream(tickers: list[str], bybit_depth: int, htx_depth: int, minutes: 
         monitor = Monitor(tickers)
         tasks = [asyncio.create_task(feed.run(session, monitor.on_event, recorder)) for feed in feeds]
         if recorder is not None:
-            logger.info(f"Recording to {STREAM_DIR}")
+            logger.info(f"Recording to {out}")
         started = time.monotonic()
         with Live(monitor.table(feeds), console=console, refresh_per_second=2) as live:
             while not minutes or time.monotonic() - started < minutes * 60:
@@ -85,6 +87,8 @@ class Monitor:
         self.started = time.time_ns()
 
     def on_event(self, event: Event) -> None:
+        if isinstance(event, HeartbeatEvent):
+            return
         activity = self.activity[event.exchange, event.ticker]
         activity.last = event.received
         activity.lags.append(event.received / 1e6 - event.ts)

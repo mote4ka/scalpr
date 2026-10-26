@@ -19,6 +19,7 @@ members = [
     "scalpr-core",
     "scalpr-scanner",
     "scalpr-strategy",
+    "scalpr-trader",
 ]
 
 [manifest.dependency-groups]
@@ -1147,6 +1148,23 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "numpy", specifier = ">=2.4.6" }]
+
+[[package]]
+name = "scalpr-trader"
+version = "0.1.0"
+source = { editable = "packages/trader" }
+dependencies = [
+    { name = "scalpr-collector" },
+    { name = "scalpr-core" },
+    { name = "scalpr-strategy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "scalpr-collector", editable = "packages/collector" },
+    { name = "scalpr-core", editable = "packages/core" },
+    { name = "scalpr-strategy", editable = "packages/strategy" },
+]
 
 [[package]]
 name = "six"

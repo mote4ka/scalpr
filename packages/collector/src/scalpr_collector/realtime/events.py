@@ -25,4 +25,11 @@ class TradeEvent:
     rpi: bool  # filled a retail-only order that isn't in the public book: a regular maker order never gets it
 
 
-Event = BookEvent | TradeEvent
+# a ping or pong of the connection: the exchange is there even when its books are quiet; live only, not recorded
+@dataclass(slots=True)
+class HeartbeatEvent:
+    exchange: str
+    received: int  # ns
+
+
+Event = BookEvent | TradeEvent | HeartbeatEvent

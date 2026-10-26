@@ -143,13 +143,18 @@ async def _archive(session: aiohttp.ClientSession, inst: str, day: date, kind: s
     return path
 
 
-# coins per contract of every trading USDT perp, by bybit-style ticker (ACEUSDT)
-async def get_contract_sizes(session: aiohttp.ClientSession) -> dict[str, float]:
+# coins per contract and price tick of every trading USDT perp, by bybit-style ticker (ACEUSDT)
+async def get_contract_specs(session: aiohttp.ClientSession) -> dict[str, dict[str, float]]:
     info, _ = await retry_fetch(session, CONTRACT_INFO_URL, params={"business_type": "swap"})
     return {
-        contract["contract_code"].replace("-", ""): float(contract["contract_size"])
+        contract["contract_code"].replace("-", ""): {"size": float(contract["contract_size"]), "tick": float(contract["price_tick"])}
         for contract in info["data"] if contract["contract_status"] == 1
     }
+
+
+# coins per contract of every trading USDT perp, by bybit-style ticker
+async def get_contract_sizes(session: aiohttp.ClientSession) -> dict[str, float]:
+    return {ticker: spec["size"] for ticker, spec in (await get_contract_specs(session)).items()}
 
 
 async def _contract_size(session: aiohttp.ClientSession, contract: str) -> float:

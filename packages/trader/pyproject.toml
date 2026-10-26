@@ -1,0 +1,26 @@
+[project]
+name = "scalpr-trader"
+version = "0.1.0"
+description = "Paper trading of XEMM on live feeds: quotes on HTX, hedges on Bybit"
+readme = "README.md"
+authors = [
+    { name = "Матвей", email = "tochnonebolotnyaytka@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "scalpr-collector",
+    "scalpr-core",
+    "scalpr-strategy",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+scalpr-core = { workspace = true }
+scalpr-collector = { workspace = true }
+scalpr-strategy = { workspace = true }
+
+[project.scripts]
+trader = "scalpr_trader:main"

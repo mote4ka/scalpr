@@ -1,0 +1,20 @@
+# copy to trader.toml and run: uv run --package scalpr-trader trader --config packages/trader/trader.toml
+
+[trader]
+maker = "htx"            # quoted exchange, bybit takes the hedges
+notional = 100           # USDT per quote
+max_position = 300       # USDT, a side stops quoting at this inventory
+quote_latency = "50ms"   # from seeing a book update to the new quote being live on htx
+hedge_latency = "50ms"   # from seeing our fill to the hedge filling on bybit
+fill = "through"         # through: a print past our price; touch: a print at it is enough
+basis_window = "1h"      # rolling median of the htx vs bybit deviation
+warmup = "30min"         # no quotes until the basis has this much history
+stale = "10s"            # quotes are pulled when nothing came from an exchange this long
+markout = "1min"         # fills are marked again this long after
+
+# edges from the walk-forward backtest, check the screener's toxicity before adding a coin
+[coins.DOTUSDT]
+edge = 0.25
+
+[coins.AVAXUSDT]
+edge = 0.2

@@ -1,14 +1,15 @@
 import asyncio
+import heapq
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import aiohttp
 from scalpr_core.logger import logger
 
 from scalpr_collector.orderbook import OrderBook
-from scalpr_collector.realtime.events import Event
+from scalpr_collector.realtime.events import Event, HeartbeatEvent
 from scalpr_collector.realtime.recorder import Recorder, recorded
 
 # no message for this long (pings included) means the connection is dead
@@ -62,24 +63,16 @@ class Feed(ABC):
             received = time.time_ns()
             message = self.decode(raw.data)
             if await self.control(ws, message):
+                on_event(HeartbeatEvent(self.exchange, received))
                 continue
             if recorder is not None:
                 recorder.write(self.exchange, received, message)
             for event in self.handle(message, received):
                 on_event(event)
 
-    # REPLAY: recorded messages through `handle`, the books end up as they were live; a gap that made the live feed
-    # reconnect makes the replay start over the same way, the next snapshots rebuild the books
+    # REPLAY: recorded messages through `handle`, the books end up as they were live (see replay_together)
     def replay(self, paths: list[Path], on_event: Callable[[Event], None]) -> None:
-        self.reset()
-        for received, message in recorded(paths):
-            try:
-                events = self.handle(message, received)
-            except Resync:
-                self.reset()
-                continue
-            for event in events:
-                on_event(event)
+        replay_together([(self, paths)], on_event)
 
     # a new connection starts with no books
     def reset(self) -> None:
@@ -101,3 +94,26 @@ class Feed(ABC):
     # what the exchange needs to keep the connection open
     async def keepalive(self, ws: aiohttp.ClientWebSocketResponse) -> None:
         return None
+
+
+# REPLAY TOGETHER: recordings of several feeds merged by receive time, so the events come in the order they came live;
+# a gap that made a live feed reconnect makes its replay start over the same way, the next snapshots rebuild the books
+def replay_together(feeds: list[tuple[Feed, list[Path]]], on_event: Callable[[Event], None]) -> None:
+    for feed, _ in feeds:
+        feed.reset()
+    streams = [_tagged(index, paths) for index, (_, paths) in enumerate(feeds)]
+    for received, index, message in heapq.merge(*streams, key=lambda item: (item[0], item[1])):
+        feed = feeds[index][0]
+        try:
+            events = feed.handle(message, received)
+        except Resync:
+            feed.reset()
+            continue
+        for event in events:
+            on_event(event)
+
+
+# messages of one feed's recording with the feed's index, for merging
+def _tagged(index: int, paths: list[Path]) -> Iterator[tuple[int, int, dict]]:
+    for received, message in recorded(paths):
+        yield received, index, message
