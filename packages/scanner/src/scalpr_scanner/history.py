@@ -1,11 +1,17 @@
 import asyncio
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 import aiohttp
 from pandas import DataFrame
 from scalpr_collector.exchanges import bybit, htx
 
 EXCHANGES = {"bybit": bybit, "htx": htx}
+# htx publishes day D after 16:00 UTC of D+1: the day before yesterday is the last one surely complete
+PUBLISH_LAG = timedelta(days=2)
+
+
+def last_complete_day() -> date:
+    return datetime.now(UTC).date() - PUBLISH_LAG
 
 
 # LOAD DAY: books of both exchanges and, with a maker leg, the trades tape of the maker exchange

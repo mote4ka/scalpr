@@ -11,15 +11,13 @@ from scalpr_collector.storage import write_parquet
 from scalpr_core.logger import console, logger
 from scalpr_core.paths import DATA_DIR
 
-from scalpr_scanner.history import load_day
+from scalpr_scanner.history import last_complete_day, load_day
 from scalpr_scanner.maker import FILL_RULES
 from scalpr_scanner.screener import SCREENS_DIR
 from scalpr_scanner.spread import basis, exchange_prices, spread_frame
 from scalpr_scanner.xemm import QUOTE_MODES, Xemm, xemm
 
 BACKTESTS_DIR = DATA_DIR / "backtests"
-# htx publishes day D after 16:00 UTC of D+1: the day before yesterday is the last one surely complete
-PUBLISH_LAG = timedelta(days=2)
 
 
 # uv run --package scalpr-scanner backtest --top 10 --days 10 --edges 0.1,0.2,0.3,0.5 --latencies 0ms,200ms --walk-forward 3
@@ -29,7 +27,7 @@ def main() -> None:
     parser.add_argument("--screen", type=Path, help="screen parquet to take candidates from (default: the latest in data/screener)")
     parser.add_argument("--top", type=int, default=10, help="candidates to take from the screen (default 10)")
     parser.add_argument("--days", type=int, default=3, help="UTC days back from --last-day (default 3)")
-    parser.add_argument("--last-day", type=date.fromisoformat, default=datetime.now(UTC).date() - PUBLISH_LAG,
+    parser.add_argument("--last-day", type=date.fromisoformat, default=last_complete_day(),
                         help="last UTC day, YYYY-MM-DD (default: the day before yesterday)")
     parser.add_argument("--edges", default="0.1,0.15,0.2,0.25", help="quote distances from fair in %%, comma separated (default 0.1,0.15,0.2,0.25)")
     parser.add_argument("--notional", type=float, default=100, help="quote size in USDT (default 100)")

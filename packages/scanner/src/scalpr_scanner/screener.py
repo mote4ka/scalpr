@@ -1,6 +1,6 @@
 import argparse
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import numpy as np
 from pandas import DataFrame, concat
@@ -11,7 +11,9 @@ from scalpr_collector.storage import write_parquet
 from scalpr_core.logger import console, logger
 from scalpr_core.paths import DATA_DIR
 
+from scalpr_scanner.history import last_complete_day
 from scalpr_scanner.spread import FEES
+from scalpr_scanner.toxicity import TOXICITY_WINDOWS, toxicity
 
 SCREENS_DIR = DATA_DIR / "screener"
 # same ticker on both exchanges but prices this far apart: another token or another multiplier (1000PEPE)
@@ -30,16 +32,22 @@ def main() -> None:
     parser.add_argument("--trades", type=int, default=20, help="check the recent HTX tape of this many best candidates (default 20)")
     parser.add_argument("--top", type=int, default=30, help="rows in the table (default 30)")
     parser.add_argument("--tradfi", action="store_true", help="keep tokenized stocks, indices and commodities (they trade on market hours)")
+    parser.add_argument("--latency", choices=TOXICITY_WINDOWS, default="200ms",
+                        help="toxicity window taken off the room: about how long a quote change and a hedge take (default 200ms)")
+    parser.add_argument("--toxicity-day", type=date.fromisoformat, default=last_complete_day(),
+                        help="UTC day whose trade archives measure toxicity (default: the day before yesterday)")
     args = parser.parse_args()
 
-    screen = asyncio.run(run(args.samples, args.interval, args.min_turnover, args.min_hedge_turnover, args.trades, args.tradfi))
-    print_screen(screen, args.top)
+    screen = asyncio.run(run(args.samples, args.interval, args.min_turnover, args.min_hedge_turnover, args.trades, args.tradfi, args.toxicity_day))
+    screen = rerank(screen, args.latency)
+    print_screen(screen, args.top, args.latency, args.toxicity_day)
     path = SCREENS_DIR / f"{datetime.now(UTC):%Y-%m-%d_%H%M}.parquet"
     write_parquet(screen, path)
     logger.info(f"Screen saved to {path}")
 
 
-async def run(samples: int, interval: float, min_turnover: float, min_hedge_turnover: float, tape_checks: int, tradfi: bool) -> DataFrame:
+async def run(samples: int, interval: float, min_turnover: float, min_hedge_turnover: float, tape_checks: int, tradfi: bool,
+              toxicity_day: date) -> DataFrame:
     manager = SessionManager()
     session = await manager.getSession()
     try:
@@ -54,15 +62,34 @@ async def run(samples: int, interval: float, min_turnover: float, min_hedge_turn
         candidates = screen.index[screen["candidate"]][:tape_checks]
         limit = asyncio.Semaphore(TRADES_REQUESTS)
 
-        async def check(ticker: str) -> DataFrame:
+        # the live htx tape for its profile, the archived tapes of both exchanges for toxicity
+        async def check(ticker: str) -> dict:
             async with limit:
-                return await htx.get_recent_trades(session, ticker)
+                stats = tape_profile(await htx.get_recent_trades(session, ticker))
+                try:
+                    htx_trades = await htx.get_trades_history(session, ticker, toxicity_day)
+                    bybit_trades = await bybit.get_trades_history(session, ticker, toxicity_day)
+                except Exception as error:  # noqa: BLE001 - a new listing has no archives yet, the coin stays unchecked
+                    logger.warning(f"{ticker}: no toxicity for {toxicity_day}, {error!r}")
+                    return stats
+                return {**stats, **toxicity(htx_trades, bybit_trades)}
 
-        tapes = await asyncio.gather(*(check(ticker) for ticker in candidates))
+        checks = await asyncio.gather(*(check(ticker) for ticker in candidates))
     finally:
         await manager.closeSession()
-    tape_stats = DataFrame([tape_profile(tape) for tape in tapes], index=candidates)
-    return screen.join(tape_stats)
+    return screen.join(DataFrame(checks, index=candidates))
+
+
+# RERANK: checked candidates by what is left after toxicity, the unchecked ones keep the order of their ceiling below
+# net room % = room - toxicity at `window`: edge left after costs and after the bybit move a quote meets on average
+def rerank(screen: DataFrame, window: str) -> DataFrame:
+    column = f"toxicity {window} %"
+    if column not in screen:
+        screen[column] = np.nan
+    screen["net room %"] = screen["room %"] - screen[column]
+    screen["net ceiling, USDT/day"] = (screen["htx 24h, USDT"] * screen["net room %"] / 100).clip(lower=0)
+    screen["checked"] = screen[column].notna()
+    return screen.sort_values(["candidate", "checked", "net ceiling, USDT/day", "ceiling, USDT/day"], ascending=False)
 
 
 # RANK: median over snapshots of both books for every common perp
@@ -130,11 +157,12 @@ def tape_profile(tape: DataFrame) -> dict:
     }
 
 
-def print_screen(screen: DataFrame, top_rows: int) -> None:
+def print_screen(screen: DataFrame, top_rows: int, window: str, toxicity_day: date) -> None:
     candidates = screen[screen["candidate"]]
-    table = Table(title=f"XEMM candidates: quote HTX, hedge on Bybit ({len(candidates)} of {len(screen)} common perps)")
-    columns = ("ticker", "htx half %", "costs %", "room %", "spread ticks", "htx 24h, USDT", "trades 24h", "ceiling/day",
-               "deviation %", "htx top, USDT", "trades/hour", "USDT/hour", "median trade", "same size", "same gap")
+    table = Table(title=f"XEMM candidates: quote HTX, hedge on Bybit ({len(candidates)} of {len(screen)} common perps), "
+                        f"by net room after {window} toxicity of {toxicity_day}")
+    columns = ("ticker", "htx half %", "costs %", "room %", "toxicity 50ms", "toxicity 200ms", "net room %", "spread ticks",
+               "htx 24h, USDT", "net ceiling/day", "ceiling/day", "deviation %", "trades/hour", "median trade", "same size", "same gap")
     for column in columns:
         table.add_column(column, justify="right")
     for ticker, row in candidates.head(top_rows).iterrows():
@@ -143,14 +171,15 @@ def print_screen(screen: DataFrame, top_rows: int) -> None:
             f"{row['htx half %']:.3f}",
             f"{row['costs %']:.3f}",
             f"{row['room %']:+.3f}",
+            _number(row.get("toxicity 50ms %"), "{:+.3f}"),
+            _number(row.get("toxicity 200ms %"), "{:+.3f}"),
+            _number(row.get("net room %"), "{:+.3f}"),
             f"{row['htx spread, ticks']:.0f}",
             f"{row['htx 24h, USDT']:,.0f}",
-            f"{row['htx 24h trades']:,.0f}",
+            _number(row.get("net ceiling, USDT/day"), "{:,.0f}"),
             f"{row['ceiling, USDT/day']:,.0f}",
             f"{row['deviation %']:+.2f}",
-            f"{row['htx top, USDT']:,.0f}",
             _number(row.get("trades/hour"), "{:.0f}"),
-            _number(row.get("USDT/hour"), "{:,.0f}"),
             _number(row.get("median trade, USDT"), "{:,.0f}"),
             _number(row.get("same size"), "{:.0%}"),
             _number(row.get("same gap"), "{:.0%}"),
