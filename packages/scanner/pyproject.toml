@@ -14,12 +14,14 @@ dependencies = [
     "scalpr-collector",
     "scalpr-core",
     "scalpr-strategy",
+    "scalpr-trader",
 ]
 
 [project.scripts]
 scanner = "scalpr_scanner:main"
 screener = "scalpr_scanner.screener:main"
 backtest = "scalpr_scanner.backtest:main"
+paper-report = "scalpr_scanner.paper:main"
 
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]
@@ -29,3 +31,4 @@ build-backend = "uv_build"
 scalpr-core = { workspace = true }
 scalpr-collector = { workspace = true }
 scalpr-strategy = { workspace = true }
+scalpr-trader = { workspace = true }

@@ -53,9 +53,13 @@ def grid_prices(native: DataFrame, grid: DatetimeIndex) -> DataFrame:
 
 
 # EXCHANGE PRICES: native and grid prices of both exchanges, keyed by exchange
-def exchange_prices(bybit: DataFrame, htx: DataFrame, day: date, notional: float, freq: str) -> tuple[dict[str, DataFrame], dict[str, DataFrame]]:
-    start = Timestamp(day, tz="UTC")
-    grid = date_range(start, start + Timedelta(days=1), freq=freq, inclusive="left", name="ts")
+# the grid covers the UTC `day`, or [start, end) when given
+def exchange_prices(bybit: DataFrame, htx: DataFrame, day: date | None, notional: float, freq: str,
+                    start: Timestamp | None = None, end: Timestamp | None = None) -> tuple[dict[str, DataFrame], dict[str, DataFrame]]:
+    if start is None:
+        start = Timestamp(day, tz="UTC")
+        end = start + Timedelta(days=1)
+    grid = date_range(start, end, freq=freq, inclusive="left", name="ts")
     native = {"bybit": native_prices(bybit, notional), "htx": native_prices(htx, notional)}
     return native, {exchange: grid_prices(prices, grid) for exchange, prices in native.items()}
 
@@ -114,10 +118,10 @@ def windows(spreads: DataFrame, fees: float) -> DataFrame:
 
 
 # BASIS: normal level of the deviation, rolling median of the past `window` (no look-ahead)
-def basis(spreads: DataFrame, window: str) -> Series:
+def basis(spreads: DataFrame, window: str, warmup: str | None = None) -> Series:
     step = spreads.index[1] - spreads.index[0]
-    # warm-up: no basis until half of the window is seen
-    warm_up = max(1, int(Timedelta(window) / step / 2))
+    # warm-up: no basis until `warmup` (by default half of the window) is seen
+    warm_up = max(1, int(Timedelta(warmup) / step) if warmup is not None else int(Timedelta(window) / step / 2))
     return spreads["deviation"].rolling(window, min_periods=warm_up).median()
 
 

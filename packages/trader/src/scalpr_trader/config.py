@@ -61,3 +61,8 @@ def load(path: Path) -> Config:
     if config.fill not in FILL_RULES:
         raise ValueError(f"fill must be one of {FILL_RULES}")
     return config
+
+
+# the config back from run.json of a journal (dataclasses.asdict of a Config)
+def from_dict(raw: dict) -> Config:
+    return Config(tuple(Coin(**coin) for coin in raw["coins"]), **{name: value for name, value in raw.items() if name != "coins"})

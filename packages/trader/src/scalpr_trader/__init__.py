@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 from rich.live import Live
@@ -35,6 +36,14 @@ def main() -> None:
 
     config = load(args.config)
     journal = None if args.no_journal else Journal()
+    if journal is not None:
+        # what paper-report needs to rerun the same strategy in the backtest
+        journal.write_run({
+            "mode": "replay" if args.replay else "live",
+            "replay": str(args.replay) if args.replay else None,
+            "record": str(args.record) if args.record else None,
+            "config": asdict(config),
+        })
     try:
         if args.replay:
             asyncio.run(replay(config, args.replay, journal))

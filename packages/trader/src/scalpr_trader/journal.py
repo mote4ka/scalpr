@@ -9,11 +9,16 @@ PAPER_DIR = DATA_DIR / "paper"
 
 
 # JOURNAL: what the trader did, json lines in data/paper/<start time>/: fills.jsonl (one line per hedged fill),
-# markouts.jsonl (a fill marked again later) and snapshots.jsonl (every coin every 10 s)
+# markouts.jsonl (a fill marked again later) and snapshots.jsonl (every coin every 10 s), plus run.json
 class Journal:
     def __init__(self, root: Path = PAPER_DIR):
         self.folder = root / f"{datetime.now(UTC):%Y-%m-%d_%H%M%S}"
         self.files: dict[str, IO[str]] = {}
+
+    # run.json: how the run was started and its config (see config.from_dict)
+    def write_run(self, run: dict) -> None:
+        self.folder.mkdir(parents=True, exist_ok=True)
+        (self.folder / "run.json").write_text(json.dumps(run, indent=2, default=_plain), encoding="utf-8")
 
     def write(self, name: str, record: dict) -> None:
         if name not in self.files:

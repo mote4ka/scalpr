@@ -1125,6 +1125,7 @@ dependencies = [
     { name = "scalpr-collector" },
     { name = "scalpr-core" },
     { name = "scalpr-strategy" },
+    { name = "scalpr-trader" },
 ]
 
 [package.metadata]
@@ -1135,6 +1136,7 @@ requires-dist = [
     { name = "scalpr-collector", editable = "packages/collector" },
     { name = "scalpr-core", editable = "packages/core" },
     { name = "scalpr-strategy", editable = "packages/strategy" },
+    { name = "scalpr-trader", editable = "packages/trader" },
 ]
 
 [[package]]

@@ -32,7 +32,8 @@ class Xemm:
 # of the hedge exchange can catch a quote that is not replaced yet; the curve still shows the grid step quotes
 # a quote is filled by the trades that come while it stands (see scalpr_strategy.filled)
 def xemm(spreads: DataFrame, basis: Series, native: dict[str, DataFrame], grid: dict[str, DataFrame], trades: DataFrame,
-         maker: str, notional: float, edge: float, max_position: float, rule: str, latency: str, quotes: str = "tick") -> Xemm:
+         maker: str, notional: float, edge: float, max_position: float, rule: str, latency: str, quotes: str = "tick",
+         hedge_latency: str | None = None) -> Xemm:
     taker = "htx" if maker == "bybit" else "bybit"
     fair = fair_price(grid[taker]["mid"], basis, maker).to_numpy()
     best_bid, best_ask = grid[maker]["bid"].to_numpy(), grid[maker]["ask"].to_numpy()
@@ -43,6 +44,8 @@ def xemm(spreads: DataFrame, basis: Series, native: dict[str, DataFrame], grid: 
     hedges = books[taker]
     ts = spreads.index.as_unit("ns").asi8
     step, delay, markout_after = ts[1] - ts[0], Timedelta(latency).value, MARKOUT.value
+    # the hedge takes `latency` too unless it has its own
+    hedge_delay = Timedelta(hedge_latency).value if hedge_latency is not None else delay
     n = len(ts)
 
     # quotes of every step
@@ -68,10 +71,10 @@ def xemm(spreads: DataFrame, basis: Series, native: dict[str, DataFrame], grid: 
 
     def fill(j: int, buys: bool, quote: float, qty: float, fair_now: float, best: float) -> None:
         sign = 1 if buys else -1
-        hedge = hedges.at(tape.ts[j] + delay, "vwap_sell" if buys else "vwap_buy")
+        hedge = hedges.at(tape.ts[j] + hedge_delay, "vwap_sell" if buys else "vwap_buy")
         if np.isnan(hedge):
             # book thinner than the notional: the best price is the closest guess
-            hedge = hedges.at(tape.ts[j] + delay, "bid" if buys else "ask")
+            hedge = hedges.at(tape.ts[j] + hedge_delay, "bid" if buys else "ask")
         ledger.fill(buys, quote, qty, hedge, FEES[maker]["maker"], FEES[taker]["taker"])
         later = np.searchsorted(ts, tape.ts[j] + markout_after)
         fills.append({
