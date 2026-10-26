@@ -41,6 +41,13 @@ class OrderBook:
     def top(self, depth: int) -> tuple[list[float], list[float]]:
         return sorted(self.bids, reverse=True)[:depth], sorted(self.asks)[:depth]
 
+    # best prices without sorting the whole book, NaN for an empty side
+    def best_bid(self) -> float:
+        return max(self.bids, default=math.nan)
+
+    def best_ask(self) -> float:
+        return min(self.asks, default=math.nan)
+
 
 def book_columns(depth: int) -> list[str]:
     return [f"{side}_{kind}_{i}" for side in ("bid", "ask") for kind in ("px", "sz") for i in range(depth)]
