@@ -18,6 +18,7 @@ members = [
     "scalpr-collector",
     "scalpr-core",
     "scalpr-scanner",
+    "scalpr-strategy",
 ]
 
 [manifest.dependency-groups]
@@ -1122,6 +1123,7 @@ dependencies = [
     { name = "plotly" },
     { name = "scalpr-collector" },
     { name = "scalpr-core" },
+    { name = "scalpr-strategy" },
 ]
 
 [package.metadata]
@@ -1131,7 +1133,20 @@ requires-dist = [
     { name = "plotly", specifier = ">=7.1.0" },
     { name = "scalpr-collector", editable = "packages/collector" },
     { name = "scalpr-core", editable = "packages/core" },
+    { name = "scalpr-strategy", editable = "packages/strategy" },
 ]
+
+[[package]]
+name = "scalpr-strategy"
+version = "0.1.0"
+source = { editable = "packages/strategy" }
+dependencies = [
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "numpy", specifier = ">=2.4.6" }]
 
 [[package]]
 name = "six"

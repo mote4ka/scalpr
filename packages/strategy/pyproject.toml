@@ -1,0 +1,16 @@
+[project]
+name = "scalpr-strategy"
+version = "0.1.0"
+description = "XEMM strategy core shared by the backtest and the live trader: fees, quotes, fills, ledger"
+readme = "README.md"
+authors = [
+    { name = "Матвей", email = "tochnonebolotnyaytka@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.4.6",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"

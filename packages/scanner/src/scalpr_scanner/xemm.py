@@ -1,11 +1,10 @@
-import math
 from dataclasses import dataclass
 
 import numpy as np
 from pandas import DataFrame, Series, Timedelta, Timestamp
+from scalpr_strategy import FEES, Ledger, fair_price, filled, markout, quote_prices
 
 from scalpr_scanner.maker import Book, Tape
-from scalpr_scanner.spread import FEES
 
 # grid: quotes are set once per grid step from that step's prices
 # tick: quotes follow every update of the hedge exchange's book and reach the maker exchange `latency` later
@@ -31,13 +30,11 @@ class Xemm:
 # the tick grid and never cross the maker book; a side stops quoting when inventory reaches `max_position` USDT
 # `quotes` (see QUOTE_MODES): with "tick" a trade meets the quote made from the books `latency` before it, so a move
 # of the hedge exchange can catch a quote that is not replaced yet; the curve still shows the grid step quotes
-# a quote is filled by the trades that come while it stands (see _filled)
+# a quote is filled by the trades that come while it stands (see scalpr_strategy.filled)
 def xemm(spreads: DataFrame, basis: Series, native: dict[str, DataFrame], grid: dict[str, DataFrame], trades: DataFrame,
          maker: str, notional: float, edge: float, max_position: float, rule: str, latency: str, quotes: str = "tick") -> Xemm:
     taker = "htx" if maker == "bybit" else "bybit"
-    # deviation is htx vs bybit, so the basis shifts bybit up to htx or htx down to bybit
-    fair = grid["bybit"]["mid"] * (1 + basis / 100) if maker == "htx" else grid["htx"]["mid"] / (1 + basis / 100)
-    fair = fair.to_numpy()
+    fair = fair_price(grid[taker]["mid"], basis, maker).to_numpy()
     best_bid, best_ask = grid[maker]["bid"].to_numpy(), grid[maker]["ask"].to_numpy()
     maker_mid, taker_mid = grid[maker]["mid"].to_numpy(), grid[taker]["mid"].to_numpy()
     deviation = spreads["deviation"].to_numpy()
@@ -45,60 +42,54 @@ def xemm(spreads: DataFrame, basis: Series, native: dict[str, DataFrame], grid: 
     books, tape = {exchange: Book(prices) for exchange, prices in native.items()}, Tape(trades)
     hedges = books[taker]
     ts = spreads.index.as_unit("ns").asi8
-    step, delay, markout = ts[1] - ts[0], Timedelta(latency).value, MARKOUT.value
+    step, delay, markout_after = ts[1] - ts[0], Timedelta(latency).value, MARKOUT.value
     n = len(ts)
 
-    # quotes of every step on the tick grid; stay a maker: a quote over the other side of the book would be a taker order
+    # quotes of every step
     quoting = ~np.isnan(fair + best_bid + best_ask)
     with np.errstate(invalid="ignore"):
-        quote_bids = np.minimum(np.floor(fair * (1 - edge / 100) / tick) * tick, best_ask - tick)
-        quote_asks = np.maximum(np.ceil(fair * (1 + edge / 100) / tick) * tick, best_bid + tick)
+        quote_bids, quote_asks = quote_prices(fair, edge, tick, best_bid, best_ask)
     # step k takes the trades in (ts[k], ts[k] + step]
     trade_steps = np.searchsorted(ts, tape.ts, side="left") - 1
     in_day = (trade_steps >= 0) & (tape.ts <= ts[-1] + step)
 
-    inventory = cash = fees = 0.0  # inventory in coins on the maker exchange, the hedge holds the opposite
+    ledger = Ledger()
     bids, asks, inventories, pnl = (np.full(n, np.nan) for _ in range(4))
     fills = []
 
     # between steps with trades nothing changes but the prices: those stretches are filled at once
     def carry(start: int, end: int) -> None:
         with np.errstate(invalid="ignore"):
-            exposure = inventory * fair[start:end]
+            exposure = ledger.inventory * fair[start:end]
             bids[start:end] = np.where(quoting[start:end] & (exposure < max_position), quote_bids[start:end], np.nan)
             asks[start:end] = np.where(quoting[start:end] & (-exposure < max_position), quote_asks[start:end], np.nan)
             inventories[start:end] = exposure
-            # maker leg at its mid, the hedge at the other mid
-            pnl[start:end] = cash + inventory * (maker_mid[start:end] - taker_mid[start:end])
+            pnl[start:end] = ledger.marked(maker_mid[start:end], taker_mid[start:end])
 
-    def fill(j: int, buys: bool, quote: float, qty: float, fair_price: float, best: float) -> None:
-        nonlocal inventory, cash, fees
+    def fill(j: int, buys: bool, quote: float, qty: float, fair_now: float, best: float) -> None:
         sign = 1 if buys else -1
         hedge = hedges.at(tape.ts[j] + delay, "vwap_sell" if buys else "vwap_buy")
         if np.isnan(hedge):
             # book thinner than the notional: the best price is the closest guess
             hedge = hedges.at(tape.ts[j] + delay, "bid" if buys else "ask")
-        fee = (quote * FEES[maker]["maker"] + hedge * FEES[taker]["taker"]) * qty / 100
-        cash += sign * (hedge - quote) * qty - fee
-        fees += fee
-        inventory += sign * qty
-        later = np.searchsorted(ts, tape.ts[j] + markout)
+        ledger.fill(buys, quote, qty, hedge, FEES[maker]["maker"], FEES[taker]["taker"])
+        later = np.searchsorted(ts, tape.ts[j] + markout_after)
         fills.append({
             "ts": Timestamp(int(tape.ts[j]), tz="UTC"),
             "side": "buy" if buys else "sell",
             "price": quote,
             "size": qty,
             "usdt": quote * qty,
-            "fair": fair_price,
+            "fair": fair_now,
             # alone at the best price, the taker traded with us first
             "ahead": sign * (quote - best) > tick / 2,
             "hedge": hedge,
             # how much better than fair we traded
-            "edge %": sign * (fair_price - quote) / quote * 100,
+            "edge %": sign * (fair_now - quote) / quote * 100,
             # fill + hedge a minute later at the mids, before fees: what is locked between the two prices plus
             # where the htx vs bybit deviation went; the moves of the price itself are hedged away
-            "markout 1m %": _markout(sign, quote, hedge, deviation[later], maker) if later < n else np.nan,
-            "inventory": inventory * fair_price,
+            "markout 1m %": markout(sign, quote, hedge, deviation[later], maker) if later < n else np.nan,
+            "inventory": ledger.inventory * fair_now,
         })
 
     # TICK QUOTES: the quote standing at `at`, made from the last hedge book update before it: (update, fair, bid, ask)
@@ -108,13 +99,11 @@ def xemm(spreads: DataFrame, basis: Series, native: dict[str, DataFrame], grid: 
         update, step_of = np.searchsorted(source.ts, at, side="right") - 1, np.searchsorted(ts, at, side="right") - 1
         if update < 0 or step_of < 0:
             return None
-        shift = 1 + basis_values[step_of] / 100
-        fair_then = source.at(at, "mid") * shift if maker == "htx" else source.at(at, "mid") / shift
+        fair_then = fair_price(source.at(at, "mid"), basis_values[step_of], maker)
         bid_then, ask_then = maker_book.at(at, "bid"), maker_book.at(at, "ask")
         if np.isnan(fair_then + bid_then + ask_then):
             return None
-        bid = min(math.floor(fair_then * (1 - edge / 100) / tick) * tick, ask_then - tick)
-        ask = max(math.ceil(fair_then * (1 + edge / 100) / tick) * tick, bid_then + tick)
+        bid, ask = quote_prices(fair_then, edge, tick, bid_then, ask_then)
         return update, fair_then, bid, ask
 
     # size left of the standing bid (True) and ask (False), and the hedge book update each quote was made from
@@ -127,14 +116,14 @@ def xemm(spreads: DataFrame, basis: Series, native: dict[str, DataFrame], grid: 
         carry(done, k + 1)  # step k is quoted with the inventory it starts with
         if quotes == "grid" and quoting[k]:
             bid, ask = quote_bids[k], quote_asks[k]
-            bid_left = notional / bid if inventory * fair[k] < max_position else 0.0
-            ask_left = notional / ask if -inventory * fair[k] < max_position else 0.0
+            bid_left = notional / bid if ledger.inventory * fair[k] < max_position else 0.0
+            ask_left = notional / ask if -ledger.inventory * fair[k] < max_position else 0.0
             for j in range(first, last):
                 if not in_day[j]:
                     continue
                 buys = bool(tape.taker_sells[j])  # a taker sell hits our bid
                 quote, left, best = (bid, bid_left, best_bid[k]) if buys else (ask, ask_left, best_ask[k])
-                qty = _filled(tape.price[j], tape.size[j], quote, best, left, buys, rule, tick) if left else 0.0
+                qty = filled(tape.price[j], tape.size[j], quote, best, left, buys, rule, tick) if left else 0.0
                 if not qty:
                     continue
                 fill(j, buys, quote, qty, fair[k], best)
@@ -155,18 +144,18 @@ def xemm(spreads: DataFrame, basis: Series, native: dict[str, DataFrame], grid: 
                 if quote_update[buys] != update:
                     # a new quote: full size, unless that side is at the inventory limit
                     quote_update[buys] = update
-                    exposure = inventory * fair_then if buys else -inventory * fair_then
+                    exposure = ledger.inventory * fair_then if buys else -ledger.inventory * fair_then
                     left_by_side[buys] = notional / quote if exposure < max_position else 0.0
                 # the maker book right before the print tells if our quote was the best one
                 best = maker_book.at(tape.ts[j] - 1, "bid" if buys else "ask")
                 left = left_by_side[buys]
-                qty = _filled(tape.price[j], tape.size[j], quote, best, left, buys, rule, tick) if left and not np.isnan(best) else 0.0
+                qty = filled(tape.price[j], tape.size[j], quote, best, left, buys, rule, tick) if left and not np.isnan(best) else 0.0
                 if not qty:
                     continue
                 fill(j, buys, quote, qty, fair_then, best)
                 left_by_side[buys] -= qty
-        inventories[k] = inventory * fair[k]
-        pnl[k] = cash + inventory * (maker_mid[k] - taker_mid[k])
+        inventories[k] = ledger.inventory * fair[k]
+        pnl[k] = ledger.marked(maker_mid[k], taker_mid[k])
         done = k + 1
     carry(done, n)
 
@@ -175,31 +164,8 @@ def xemm(spreads: DataFrame, basis: Series, native: dict[str, DataFrame], grid: 
     curve[["inventory", "pnl"]] = curve[["inventory", "pnl"]].ffill()
     # close at the last moment both books are there (a partial htx day ends earlier than bybit)
     both = np.flatnonzero(~np.isnan(maker_mid + taker_mid))
-    closed = _closed_pnl(cash, inventory, books, maker, taker, ts[both[-1]]) if len(both) else cash
-    return Xemm(DataFrame(fills, columns=FILL_COLUMNS), curve, closed, fees)
-
-
-# value of a fill and its hedge, % of the fill price: sign 1 is long on the maker exchange, short on the other
-# with the maker on htx: (hedge / quote - 1) + htx vs bybit deviation; on bybit the deviation counts the other way
-def _markout(sign: int, quote: float, hedge: float, deviation: float, maker: str) -> float:
-    maker_premium = deviation if maker == "htx" else -deviation
-    return sign * ((hedge / quote - 1) * 100 + maker_premium)
-
-
-# how much of our resting order a taker print fills, `buys`: ours is a bid hit by a taker sell
-# alone at a better price than the book: the taker trades with us first, up to its size
-# level with or behind the book: a print past our price ate the level, the whole order is filled;
-# a print at our price fills up to its size only with the optimistic "touch" rule (first in the queue)
-def _filled(price: float, size: float, quote: float, best: float, left: float, buys: bool, rule: str, tick: float) -> float:
-    sign = 1 if buys else -1
-    ahead = sign * (quote - best) > tick / 2
-    through = sign * (quote - price) > tick / 2
-    at = abs(quote - price) <= tick / 2
-    if ahead:
-        return min(size, left) if through or at else 0.0
-    if through:
-        return left
-    return min(size, left) if at and rule == "touch" else 0.0
+    closed = _closed_pnl(ledger.cash, ledger.inventory, books, maker, taker, ts[both[-1]]) if len(both) else ledger.cash
+    return Xemm(DataFrame(fills, columns=FILL_COLUMNS), curve, closed, ledger.fees)
 
 
 # inventory closed with taker orders on both exchanges at `at`, fees included

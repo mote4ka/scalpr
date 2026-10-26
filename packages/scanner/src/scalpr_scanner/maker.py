@@ -1,9 +1,7 @@
 import numpy as np
 from pandas import DataFrame, Series, Timedelta, Timestamp
+from scalpr_strategy import FEES
 
-from scalpr_scanner.spread import FEES
-
-FILL_RULES = ("through", "touch")
 LABELS = {"bybit": "Bybit", "htx": "HTX"}
 MAKER_COLUMNS = ["status", "signal", "entry", "buy on", "excess %", "wait", "entry %", "exit", "exit by", "held", "closing %", "pnl %"]
 # a book lookup later than this after the last update means the data has ended (partial day)

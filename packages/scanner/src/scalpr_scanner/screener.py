@@ -10,9 +10,9 @@ from scalpr_collector.http_client import SessionManager
 from scalpr_collector.storage import write_parquet
 from scalpr_core.logger import console, logger
 from scalpr_core.paths import DATA_DIR
+from scalpr_strategy import FEES
 
 from scalpr_scanner.history import last_complete_day
-from scalpr_scanner.spread import FEES
 from scalpr_scanner.toxicity import TOXICITY_WINDOWS, toxicity
 
 SCREENS_DIR = DATA_DIR / "screener"

@@ -8,17 +8,16 @@ from rich.table import Table
 from scalpr_collector.http_client import SessionManager
 from scalpr_core.logger import console, logger
 from scalpr_core.paths import DATA_DIR
+from scalpr_strategy import FILL_RULES, MODES, round_trip_fees
 
 from scalpr_scanner.chart import spread_chart
 from scalpr_scanner.history import load_day
-from scalpr_scanner.maker import FILL_RULES, LABELS, maker_trades
+from scalpr_scanner.maker import LABELS, maker_trades
 from scalpr_scanner.spread import (
-    MODES,
     basis,
     basis_trades,
     crossing_cost,
     exchange_prices,
-    round_trip_fees,
     spread_frame,
     windows,
 )

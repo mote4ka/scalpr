@@ -10,9 +10,9 @@ from scalpr_collector.http_client import SessionManager
 from scalpr_collector.storage import write_parquet
 from scalpr_core.logger import console, logger
 from scalpr_core.paths import DATA_DIR
+from scalpr_strategy import FILL_RULES
 
 from scalpr_scanner.history import last_complete_day, load_day
-from scalpr_scanner.maker import FILL_RULES
 from scalpr_scanner.screener import SCREENS_DIR
 from scalpr_scanner.spread import basis, exchange_prices, spread_frame
 from scalpr_scanner.xemm import QUOTE_MODES, Xemm, xemm

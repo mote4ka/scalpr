@@ -13,6 +13,7 @@ dependencies = [
     "plotly>=7.1.0",
     "scalpr-collector",
     "scalpr-core",
+    "scalpr-strategy",
 ]
 
 [project.scripts]
@@ -27,3 +28,4 @@ build-backend = "uv_build"
 [tool.uv.sources]
 scalpr-core = { workspace = true }
 scalpr-collector = { workspace = true }
+scalpr-strategy = { workspace = true }
