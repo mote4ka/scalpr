@@ -1,0 +1,21 @@
+# paper XEMM trader on the live feeds, recording them too; installed by deploy/server.sh
+# logs: journalctl -u scalpr-trader -f, journals: /opt/scalpr/data/paper, recordings: /opt/scalpr/data/stream
+[Unit]
+Description=scalpr paper XEMM trader
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=scalpr
+WorkingDirectory=/opt/scalpr
+ExecStart=/opt/scalpr/.venv/bin/trader --config /opt/scalpr/trader.toml --record
+# stopped like Ctrl+C: the trader closes its journal and the open recordings
+KillSignal=SIGINT
+TimeoutStopSec=30
+Restart=always
+RestartSec=10
+# without a terminal rich wraps log lines at 80 columns
+Environment=COLUMNS=160
+
+[Install]
+WantedBy=multi-user.target

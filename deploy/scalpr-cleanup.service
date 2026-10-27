@@ -1,0 +1,8 @@
+# deletes days of recorded feeds older than two weeks, run daily by scalpr-cleanup.timer
+[Unit]
+Description=scalpr: delete old feed recordings
+
+[Service]
+Type=oneshot
+User=scalpr
+ExecStart=/bin/sh -c '[ ! -d /opt/scalpr/data/stream ] || find /opt/scalpr/data/stream -mindepth 2 -maxdepth 2 -type d -mtime +14 -exec rm -rf {} +'

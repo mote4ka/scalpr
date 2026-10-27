@@ -1,0 +1,9 @@
+[Unit]
+Description=scalpr: daily cleanup of old feed recordings
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
