@@ -40,9 +40,11 @@ class Run:
     fills: DataFrame  # one row per hedged fill, its markout joined
     snapshots: DataFrame  # every coin every 10 s
 
+    # from the first snapshot to the last snapshot or fill, a fill can come after the last snapshot
     @property
     def window(self) -> tuple[Timestamp, Timestamp]:
-        return self.snapshots["t"].min().floor("s"), self.snapshots["t"].max().ceil("s")
+        times = self.snapshots["t"] if self.fills.empty else concat([self.snapshots["t"], self.fills["ts"]])
+        return times.min().floor("s"), times.max().ceil("s")
 
 
 # uv run --package scalpr-scanner paper-report                      (the latest journal)
@@ -128,12 +130,15 @@ def print_day_report(run: Run) -> None:
 # BACKTEST of the same coins over the run's window with the run's config, on a recording or on the daily archives
 async def backtest(run: Run, source: str) -> dict[str, Xemm]:
     config, (start, end) = run.config, run.window
+    # a live run that took over the basis samples of the run before quotes from the start, so the backtest basis gets
+    # the window before the start too; the strategy itself still runs from the start
+    history = start - Timedelta(config.basis_window, unit="ns") if any(run.meta.get("warm", {}).values()) else start
     tickers = [coin.ticker for coin in config.coins]
     manager = SessionManager()
     session = await manager.getSession()
     try:
         if source == "archive":
-            days = [start.date() + timedelta(days=offset) for offset in range((end - Timedelta(1)).date().toordinal() - start.date().toordinal() + 1)]
+            days = [history.date() + timedelta(days=offset) for offset in range((end - Timedelta(1)).date().toordinal() - history.date().toordinal() + 1)]
             if days[-1] > last_complete_day():
                 logger.warning(f"archives for {days[-1]} are complete only after {days[-1] + timedelta(days=2)} UTC: rerun then, or pass a recording")
                 return {}
@@ -147,9 +152,10 @@ async def backtest(run: Run, source: str) -> dict[str, Xemm]:
     results = {}
     for coin in config.coins:
         bybit_book, htx_book, htx_trades = data[coin.ticker]
-        native, grid = exchange_prices(bybit_book, htx_book, None, coin.notional, "1s", start, end)
+        native, grid = exchange_prices(bybit_book, htx_book, None, coin.notional, "1s", history, end)
         spreads = spread_frame(grid)
         line = basis(spreads, f"{config.basis_window}ns", f"{config.warmup}ns")
+        spreads, line, grid = spreads.loc[start:], line.loc[start:], {exchange: prices.loc[start:] for exchange, prices in grid.items()}
         results[coin.ticker] = xemm(spreads, line, native, grid, htx_trades, config.maker, coin.notional, coin.edge, coin.max_position,
                                     config.fill, f"{config.quote_latency}ns", "tick", f"{config.hedge_latency}ns")
     return results

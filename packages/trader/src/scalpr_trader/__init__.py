@@ -14,6 +14,7 @@ from scalpr_collector.realtime.htx import HtxFeed
 from scalpr_collector.realtime.recorder import STREAM_DIR, Recorder
 from scalpr_core.logger import console, logger
 
+from scalpr_trader.basis import load_samples, save_samples
 from scalpr_trader.config import Config, load
 from scalpr_trader.dashboard import dashboard, write_file
 from scalpr_trader.engine import Engine
@@ -21,6 +22,7 @@ from scalpr_trader.journal import Journal
 
 BYBIT_DEPTH, HTX_DEPTH = 50, 20
 HEARTBEAT = 0.2  # s, time-driven work when no event comes
+BASIS_SAVE = 10  # s, the basis samples go to disk this often and on the way out
 
 
 # uv run --package scalpr-trader trader --config packages/trader/trader.toml
@@ -36,6 +38,9 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load(args.config)
+    # live: the basis samples the run before left within the window, no warm-up for what they cover
+    since = time.time_ns() - config.basis_window
+    warm = {} if args.replay else {coin.ticker: load_samples(coin.ticker, since) for coin in config.coins}
     journal = None if args.no_journal else Journal()
     if journal is not None:
         # what paper-report needs to rerun the same strategy in the backtest
@@ -43,13 +48,15 @@ def main() -> None:
             "mode": "replay" if args.replay else "live",
             "replay": str(args.replay) if args.replay else None,
             "record": str(args.record) if args.record else None,
+            # basis samples per coin taken over from the run before
+            "warm": {ticker: len(samples) for ticker, samples in warm.items()},
             "config": asdict(config),
         })
     try:
         if args.replay:
             asyncio.run(replay(config, args.replay, journal))
         else:
-            asyncio.run(live(config, args.minutes, args.record, journal, args.dashboard_file))
+            asyncio.run(live(config, args.minutes, args.record, journal, args.dashboard_file, warm))
     except KeyboardInterrupt:
         logger.info("Stopped")
     finally:
@@ -58,13 +65,22 @@ def main() -> None:
             logger.info(f"Journal in {journal.folder}")
 
 
-async def live(config: Config, minutes: float, record: Path | None, journal: Journal | None, dashboard_file: Path | None = None) -> None:
+async def live(config: Config, minutes: float, record: Path | None, journal: Journal | None, dashboard_file: Path | None = None,
+               warm: dict[str, list[tuple[int, float]]] | None = None) -> None:
     manager = SessionManager()
     session = await manager.getSession()
     recorder = Recorder(record) if record is not None else None
     tasks: list[asyncio.Task] = []
+    engine = None
     try:
         engine, feeds = await setup(session, config, journal)
+        now = time.time_ns()
+        for ticker, samples in (warm or {}).items():
+            basis = engine.coins[ticker].basis
+            basis.restore(samples, now)
+            if basis.samples:
+                ready = "warm" if basis.value is not None else f"warm in {basis.left(now) / 60e9:.0f} min"
+                logger.info(f"{ticker}: basis from {len(basis.samples)} s of samples of the run before, {ready}")
         tasks = [asyncio.create_task(feed.run(session, engine.on_event, recorder)) for feed in feeds]
         started = time.monotonic()
         with Live(dashboard(engine, "Paper XEMM"), console=console, refresh_per_second=2) as view:
@@ -85,13 +101,22 @@ async def live(config: Config, minutes: float, record: Path | None, journal: Jou
                     for sink in (recorder, journal):
                         if sink is not None:
                             sink.flush()
+                if beats % round(BASIS_SAVE / HEARTBEAT) == 0:
+                    _save_basis(engine)
     finally:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         if recorder is not None:
             recorder.close()
+        if engine is not None:
+            _save_basis(engine)
         await manager.closeSession()
+
+
+def _save_basis(engine: Engine) -> None:
+    for ticker, state in engine.coins.items():
+        save_samples(state.basis, ticker)
 
 
 # the same engine on a recording: events in the order they came live, time follows their receive times

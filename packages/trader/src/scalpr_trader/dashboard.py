@@ -27,7 +27,7 @@ def dashboard(engine: Engine, title: str) -> Table:
         pnl = engine.pnl(state)
         table.add_row(
             ticker,
-            state.status,
+            f"warmup {_clock(state.basis.left(engine.now))}" if state.status == "warmup" else state.status,
             f"{state.coin.edge:g}",
             _number(state.basis.value, "{:+.3f}"),
             _number(state.fair, "{:.6g}"),
@@ -63,6 +63,12 @@ def write_file(table: Table, path: Path) -> None:
     part = path.with_suffix(".part")
     part.write_text(text.getvalue(), encoding="utf-8")
     part.replace(path)
+
+
+# ns as m:ss
+def _clock(ns: int) -> str:
+    seconds = round(ns / 1e9)
+    return f"{seconds // 60}:{seconds % 60:02d}"
 
 
 def _number(value: float | None, template: str) -> str:
