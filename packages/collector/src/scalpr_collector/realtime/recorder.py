@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO
 
+from scalpr_core.logger import logger
 from scalpr_core.paths import DATA_DIR
 
 STREAM_DIR = DATA_DIR / "stream"
@@ -12,7 +13,8 @@ HOUR = 3_600_000_000_000  # ns
 
 
 # RECORDER: raw websocket messages with the local receive time, one gzip json-lines file per exchange and UTC hour:
-# data/stream/<exchange>/<YYYY-MM-DD>/<HH>.jsonl.gz, a line is {"r": received ns, "m": message}
+# data/stream/<exchange>/<YYYY-MM-DD>/<HH>.jsonl.gz, a line is {"r": received ns, "m": message}; a restart within
+# the hour goes on in <HH>_<MMSS>.jsonl.gz, which sorts after <HH> and before the next hour
 # replaying them through the same feed rebuilds the books exactly (see replay)
 class Recorder:
     def __init__(self, root: Path = STREAM_DIR):
@@ -27,8 +29,10 @@ class Recorder:
                 current[1].close()
             started = datetime.fromtimestamp(hour * HOUR / 1e9, UTC)
             path = self.root / exchange / f"{started:%Y-%m-%d}" / f"{started:%H}.jsonl.gz"
+            if path.exists():
+                # not appended to: the old file may end cut by a kill, and nothing after a cut member can be read
+                path = path.with_name(f"{datetime.fromtimestamp(received / 1e9, UTC):%H_%M%S}.jsonl.gz")
             path.parent.mkdir(parents=True, exist_ok=True)
-            # append: a restart within the hour adds a new gzip member, readers see one stream
             current = self.files[exchange] = (hour, gzip.open(path, "at", encoding="utf-8"))  # noqa: SIM115 - open for the whole hour
         current[1].write(json.dumps({"r": received, "m": message}, separators=(",", ":")) + "\n")
 
@@ -46,8 +50,12 @@ class Recorder:
 def recorded(paths: list[Path]) -> Iterator[tuple[int, dict]]:
     for path in sorted(paths):
         with gzip.open(path, "rt", encoding="utf-8") as file:
-            for line in file:
-                # a line cut by a crash is the last one of its member
-                if line.endswith("\n"):
-                    record = json.loads(line)
-                    yield record["r"], record["m"]
+            try:
+                for line in file:
+                    # a line cut by a crash is the last one of its member
+                    if line.endswith("\n"):
+                        record = json.loads(line)
+                        yield record["r"], record["m"]
+            except EOFError:
+                # the recorder was killed: everything before the missing gzip trailer is there
+                logger.warning(f"{path} ends cut, read up to the cut")
