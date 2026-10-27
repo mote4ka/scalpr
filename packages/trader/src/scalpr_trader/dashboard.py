@@ -1,9 +1,15 @@
+import io
 import math
 import statistics
+from datetime import UTC, datetime
+from pathlib import Path
 
+from rich.console import Console
 from rich.table import Table
 
 from scalpr_trader.engine import Engine
+
+FILE_WIDTH = 200  # wider than the table, it keeps its own width
 
 
 # DASHBOARD: one row per coin and a total, what the paper trader is doing right now
@@ -45,6 +51,18 @@ def dashboard(engine: Engine, title: str) -> Table:
     table.add_row("total", *[""] * 8, f"{totals['fills'][0]} / {totals['fills'][1]}", f"{totals['volume']:,.0f}", "",
                   f"{totals['fees']:.2f}", f"{totals['pnl']:+.2f}", "")
     return table
+
+
+# the dashboard with its colors, replaced whole at every write: a trader without a terminal (the systemd service) is
+# watched with `watch -c cat <path>`, see deploy/watch.sh; the time on top shows the file is still being written
+def write_file(table: Table, path: Path) -> None:
+    text = io.StringIO()
+    console = Console(file=text, width=FILE_WIDTH, force_terminal=True, color_system="standard")
+    console.print(f"{datetime.now(UTC):%Y-%m-%d %H:%M:%S} UTC")
+    console.print(table)
+    part = path.with_suffix(".part")
+    part.write_text(text.getvalue(), encoding="utf-8")
+    part.replace(path)
 
 
 def _number(value: float | None, template: str) -> str:

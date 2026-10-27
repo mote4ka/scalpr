@@ -15,7 +15,7 @@ from scalpr_collector.realtime.recorder import STREAM_DIR, Recorder
 from scalpr_core.logger import console, logger
 
 from scalpr_trader.config import Config, load
-from scalpr_trader.dashboard import dashboard
+from scalpr_trader.dashboard import dashboard, write_file
 from scalpr_trader.engine import Engine
 from scalpr_trader.journal import Journal
 
@@ -32,6 +32,7 @@ def main() -> None:
     parser.add_argument("--minutes", type=float, default=0, help="live: stop after this long (default 0: until Ctrl+C)")
     parser.add_argument("--record", type=Path, nargs="?", const=STREAM_DIR, help="live: also record the raw feeds (default folder data/stream)")
     parser.add_argument("--no-journal", action="store_true", help="don't write fills and snapshots to data/paper")
+    parser.add_argument("--dashboard-file", type=Path, help="live: also write the dashboard to this file every second, to watch a trader without a terminal")
     args = parser.parse_args()
 
     config = load(args.config)
@@ -48,7 +49,7 @@ def main() -> None:
         if args.replay:
             asyncio.run(replay(config, args.replay, journal))
         else:
-            asyncio.run(live(config, args.minutes, args.record, journal))
+            asyncio.run(live(config, args.minutes, args.record, journal, args.dashboard_file))
     except KeyboardInterrupt:
         logger.info("Stopped")
     finally:
@@ -57,7 +58,7 @@ def main() -> None:
             logger.info(f"Journal in {journal.folder}")
 
 
-async def live(config: Config, minutes: float, record: Path | None, journal: Journal | None) -> None:
+async def live(config: Config, minutes: float, record: Path | None, journal: Journal | None, dashboard_file: Path | None = None) -> None:
     manager = SessionManager()
     session = await manager.getSession()
     recorder = Recorder(record) if record is not None else None
@@ -77,7 +78,10 @@ async def live(config: Config, minutes: float, record: Path | None, journal: Jou
                 engine.tick(time.time_ns())
                 beats += 1
                 if beats % round(1 / HEARTBEAT) == 0:
-                    view.update(dashboard(engine, f"Paper XEMM, {time.monotonic() - started:.0f} s"))
+                    table = dashboard(engine, f"Paper XEMM, {time.monotonic() - started:.0f} s")
+                    view.update(table)
+                    if dashboard_file is not None:
+                        write_file(table, dashboard_file)
                     for sink in (recorder, journal):
                         if sink is not None:
                             sink.flush()

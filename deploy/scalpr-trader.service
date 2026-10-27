@@ -1,5 +1,6 @@
 # paper XEMM trader on the live feeds, recording them too; installed by deploy/server.sh
-# logs: journalctl -u scalpr-trader -f, journals: /opt/scalpr/data/paper, recordings: /opt/scalpr/data/stream
+# to watch it: scalpr-watch (deploy/watch.sh); logs: journalctl -u scalpr-trader -f
+# journals: /opt/scalpr/data/paper, recordings: /opt/scalpr/data/stream
 [Unit]
 Description=scalpr paper XEMM trader
 Wants=network-online.target
@@ -8,7 +9,7 @@ After=network-online.target
 [Service]
 User=scalpr
 WorkingDirectory=/opt/scalpr
-ExecStart=/opt/scalpr/.venv/bin/trader --config /opt/scalpr/trader.toml --record
+ExecStart=/opt/scalpr/.venv/bin/trader --config /opt/scalpr/trader.toml --record --dashboard-file /opt/scalpr/data/dashboard.txt
 # stopped like Ctrl+C: the trader closes its journal and the open recordings
 KillSignal=SIGINT
 TimeoutStopSec=30

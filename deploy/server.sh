@@ -6,7 +6,7 @@ code=$1  # the unpacked archive
 root=/opt/scalpr
 
 missing=""
-for package in chrony curl ca-certificates; do
+for package in chrony curl ca-certificates tmux; do
     dpkg -s "$package" >/dev/null 2>&1 || missing="$missing $package"
 done
 if [ -n "$missing" ]; then
@@ -27,9 +27,10 @@ cd "$root"
 runuser -u scalpr -- env HOME="$root" uv sync --frozen --no-dev --package scalpr-trader
 [ -f trader.toml ] || runuser -u scalpr -- cp packages/trader/config.example.toml trader.toml
 
+install -m 755 deploy/watch.sh /usr/local/bin/scalpr-watch
 install -m 644 deploy/*.service deploy/*.timer /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now scalpr-cleanup.timer
 systemctl enable scalpr-trader
 systemctl start scalpr-trader
-echo "deployed; logs: journalctl -u scalpr-trader -f"
+echo "deployed; to watch it: scalpr-watch"
