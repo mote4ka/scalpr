@@ -1,0 +1,67 @@
+---
+paths:
+  - "packages/strategy/**"
+  - "packages/scanner/**"
+  - "packages/trader/**"
+  - "packages/collector/src/scalpr_collector/realtime/**"
+---
+
+# Модель XEMM: формулы, исполнение, время
+
+Любое изменение fill/latency/basis/P&L модели — с проверкой и объяснением, как оно влияет на
+сопоставимость backtest ↔ paper. Менять в `scalpr_strategy`, а не копировать в scanner/trader.
+
+## Формулы (`scalpr_strategy`)
+
+- Проценты, не доли: `edge`, `basis`, комиссии, `markout` — в %.
+- `deviation = (htx_mid / bybit_mid - 1) * 100`; базис = rolling-медиана deviation за `basis_window` (1h),
+  сэмпл раз в секунду; до `warmup` (30min) значений базиса нет — котировок нет.
+- `fair_price(hedge_mid, basis, maker)`: maker=htx → `hedge_mid * (1 + basis/100)`, maker=bybit → деление.
+- `quote_prices`: bid = floor(fair·(1−edge/100)) на сетке tick, но не выше `best_ask − tick`; ask симметрично —
+  котировка никогда не становится тейкерской.
+- `FEES` (% за сделку, стандартный уровень): bybit maker 0.02 / taker 0.055, htx maker 0.02 / taker 0.05.
+  Это допущение модели, не проверенные тарифы аккаунта.
+- `filled(...)`: если наша цена лучше книги (`ahead`) — тейкер идёт к нам первым, до своего объёма; на уровне книги
+  или позади — сделка «через» нашу цену исполняет заявку целиком; сделка ровно по нашей цене исполняет только при
+  `touch` (оптимистично, первые в очереди). По умолчанию `through`. Очередь по объёму не моделируется.
+- `Ledger`: inventory в монетах на maker-бирже, хедж — противоположная позиция; cash и fees в USDT;
+  `marked()` = cash + inventory·(maker_mid − hedge_mid).
+- `markout`: стоимость пары fill+hedge через `markout` (1min) по mid'ам с учётом deviation, % от цены fill, до комиссий.
+
+## Временные шкалы — критично
+
+- `BookEvent.ts` / `TradeEvent.ts` — **время биржи, мс**; `received` — **локальные часы, нс**.
+- Paper-движок (`trader/engine.py`) и бэктест на записи (`scanner/stream_data.py`) живут по **receive time**.
+  Исключение: `maker_tops` и «лучшая цена до сделки» сравниваются по времени биржи (мс).
+- Бэктест на дневных архивах (`backtest`, `scanner`) — по **времени биржи**.
+- Поэтому одна и та же физика даёт разные числа задержек:
+  - receive-шкала: `quote_latency` ≈ путь заявки до HTX **плюс** путь сделки HTX обратно к серверу
+    (оценка ~93–100 ms из Сингапура), `hedge_latency` ≈ 17–20 ms (Bybit RTT ~16–17 ms);
+  - шкала биржи (архивы): те же пути ~50–55 ms.
+  Это оценки по RTT, а не измеренная активация реальной заявки HTX и private fill notification.
+- Конфиг-длительности: строки `"50ms"`, `"5s"`, `"30min"`, `"1h"` → нс (`trader/config.duration`).
+- Архивы Bybit — по UTC-дню; HTX — по дню UTC+8, один UTC-день затрагивает два архива HTX.
+- Размеры сделок/стаканов HTX приходят в контрактах; коллектор переводит в монеты через contract size.
+- Тикеры везде bybit-style (`DOTUSDT`); HTX-контракт `DOT-USDT`, архивная папка `DOT-USDT-PERP`.
+
+## Paper-движок (`scalpr_trader`)
+
+- Каждое обновление любого стакана → `requote`; новая котировка/отмена становится live через `quote_latency`
+  (`PaperQuotes`), старая может успеть исполниться.
+- Сделка HTX (кроме RPI) сверяется со стоящей котировкой; hedge исполняется через `hedge_latency` по VWAP стакана
+  Bybit на тот момент (книга тоньше объёма — по лучшей цене).
+- Stale: если от биржи ничего (включая heartbeat) не было `stale` (10s) — котировки снимаются. Тихий стакан сам по
+  себе не stale.
+- Лимит: сторона перестаёт котироваться при |inventory·fair| ≥ `max_position` USDT; после fill сторона
+  переставляется на полный `notional`.
+- Глубины фидов: Bybit 50, HTX 20. Snapshots в журнал каждые 10 s, basis-сэмплы на диск каждые 10 s и при выходе.
+- Live-старт подхватывает `data/paper/basis/<TICKER>.json` в пределах окна; `run.json["warm"]` хранит число
+  восстановленных сэмплов, `paper-report` тогда берёт историю базиса до старта. Replay не трогает basis-файлы.
+- Numpy-скаляры в журнал — через `default=_plain`; булевы/float из numpy приводить явно.
+
+## Бэктест (`scalpr_scanner.xemm`)
+
+- Режимы котировок: `tick` (котировка следует каждому апдейту книги Bybit с задержкой) и `grid` (раз в шаг).
+- Fill — по ленте сделок HTX и `filled`; хедж — VWAP книги Bybit через `hedge_latency`; markout 1 min.
+- `paper-report` прогоняет `xemm` на том же окне и источнике (`auto`: запись, которую run делал/реплеил, иначе
+  архивы) с конфигом из `run.json` и сопоставляет fills по стороне, цене и времени (`--tolerance 2s`).
