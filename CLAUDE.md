@@ -42,24 +42,28 @@ uv run --package scalpr-collector stream --tickers DOTUSDT,AVAXUSDT [--minutes N
 uv run --package scalpr-scanner scanner <TICKER> <YYYY-MM-DD> [--strategy basis|xemm]   # один день + plotly-график
 uv run --package scalpr-scanner screener [--latency 50ms|200ms]
 uv run --package scalpr-scanner backtest --tickers A,B --days 7 --edges 0.1,0.15,0.2,0.25 --latencies 50ms,200ms,500ms --walk-forward 3
+#   + [--hedge-latency 20ms] [--anchor fair|book] [--vol-edge K] [--vol-window 5min] [--skew S]
 uv run --package scalpr-trader trader --config <trader.toml> [--minutes N] [--record [DIR]] [--replay DIR] [--no-journal]
 uv run --package scalpr-scanner paper-report [data/paper/<start>] [--source auto|archive|<recording>]
 uv run ruff check .
 ```
 
 - Entry point `collector` — заглушка (печатает hello); исторические дни качаются через `scanner`/`backtest`/`paper-report`.
-- `backtest --latencies` задаёт **одну** задержку и для перестановки котировки, и для хеджа; раздельные
-  `quote_latency`/`hedge_latency` есть в `xemm(..., hedge_latency=)` и используются `paper-report`.
+- `backtest --latencies` — задержка перестановки котировки (и хеджа, если не задан `--hedge-latency`).
 - Архивы публикуются с лагом: последний полный день — позавчера UTC (`history.PUBLISH_LAG`).
 - `trader.toml`: в `[trader]` — `maker` (только `"htx"`), `notional`, `max_position`, `quote_latency`, `hedge_latency`,
-  `fill`, `basis_window`, `warmup`, `stale`, `markout`; в `[coins.<TICKER>]` — `edge` и опционально свои
-  `notional`/`max_position`. Тикер — имя таблицы. Локального `packages/trader/trader.toml` сейчас нет.
+  `fill`, `basis_window`, `warmup`, `stale`, `markout`, необязательные `anchor` (`"fair"`/`"book"`), `vol_window`,
+  `vol_edge`, `skew`; в `[coins.<TICKER>]` — `edge` и опционально свои `notional`/`max_position`/`vol_edge`/`skew`.
+  Тикер — имя таблицы. Новые параметры по умолчанию выключены — старый конфиг даёт прежний результат.
+  Локального `packages/trader/trader.toml` сейчас нет.
 
 ## Проверки
 
-- **Тестов в репозитории нет** (pytest есть в dev-группе, файлов тестов нет). Прошлые сверки (replay ↔ REST,
-  paper ↔ backtest 8/8 fills, регрессия XEMM 12/12) делались разовыми скриптами — при изменении модели их
-  нужно воспроизводить заново или оформлять в настоящие тесты.
+- Тесты: `uv run pytest` (лежат в `packages/<name>/tests`, без сети и без `data/`): ядро стратегии, движок трейдера
+  на синтетических событиях, `xemm()` на синтетическом дне.
+- Регрессия при изменении модели: со старыми параметрами должны совпасть fills реплея `data/stream-test/run1`
+  (8 fills, = журнал `data/paper/2026-10-26_151626`) и бэктеста на кэшированных днях. Разовые сверки
+  (replay ↔ REST, paper ↔ backtest 8/8) в тесты пока не оформлены.
 - Ruff без проектного конфига (дефолты ruff 0.17). Новый код чистый; 21 замечание — в старых
   `scalpr_core/{logger,retry,paths,config}.py` и `collector/http_client.py`. **`ruff format` не запускать**:
   стиль проекта — длинные строки, форматтер переписал бы 34 файла.
