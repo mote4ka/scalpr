@@ -19,7 +19,7 @@ from scalpr_live.specs import Spec, steps
 class Listener(Protocol):
     def answered(self, ticker: str, order_id: int, live: bool, now: int) -> None: ...
     def canceled(self, ticker: str, order_id: int, now: int) -> None: ...
-    def filled(self, ticker: str, order_id: int, contracts: int, price: float, now: int) -> None: ...
+    def filled(self, ticker: str, order_id: int, contracts: int, price: float, bid: bool, now: int) -> None: ...
     def hedged(self, ticker: str, sent: float, filled: float, price: float, now: int) -> None: ...
 
 
@@ -55,6 +55,10 @@ class SimExchange:
     def hedge(self, ticker: str, coins: float, limit: float, now: int) -> None:
         self._at(now + self.config.hedge_latency, lambda at: self._hedge(ticker, coins, limit, at))
 
+    # a simulated exchange never fails
+    def trouble(self) -> str | None:
+        return None
+
     # what was due by `now` happens, in the order it was due
     def tick(self, now: int) -> None:
         while self.due and self.due[0][0] <= now:
@@ -82,7 +86,7 @@ class SimExchange:
             resting.left -= contracts
             if resting.left <= 0:
                 del self.resting[resting.id]
-            self.listener.filled(trade.ticker, resting.id, contracts, resting.price, trade.received)
+            self.listener.filled(trade.ticker, resting.id, contracts, resting.price, resting.bid, trade.received)
 
     def _at(self, at: int, happen: Callable[[int], None]) -> None:
         heapq.heappush(self.due, (at, next(self.order), happen))

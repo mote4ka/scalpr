@@ -5,9 +5,9 @@
 Fair price на HTX = mid Bybit, сдвинутый на rolling-медиану базиса HTX vs Bybit.
 Это не арбитраж «купил дешевле/продал дороже»: котируем постоянно, хеджируемся по факту исполнения.
 
-Текущая фаза — **paper trading и подготовка к реальной**. `scalpr-live` читает реальные аккаунты через приватный
-API (только чтение); ключи `BYBIT_API_KEY/SECRET`, `HTX_API_KEY/SECRET` — в `.env`, читаются `scalpr_core.config`.
-Код ордера пока не выставляет. Комиссии аккаунта Bybit выше модели — см. `.claude/rules/live.md`.
+Текущая фаза — **paper trading и подготовка к реальной**. `scalpr-live` умеет реальные ордера (HTX V5 + Bybit, только
+с флагом `--real`), но реальных ордеров ещё не было; ключи `BYBIT_API_KEY/SECRET`, `HTX_API_KEY/SECRET` (субаккаунты
+бота) — в `.env`, читаются `scalpr_core.config`. Комиссии аккаунта Bybit выше модели — см. `.claude/rules/live.md`.
 
 ## Рабочие правила
 
@@ -32,7 +32,7 @@ API (только чтение); ключи `BYBIT_API_KEY/SECRET`, `HTX_API_KEY
 | `scalpr-collector` | `scalpr_collector` | архивы бирж → Parquet (`exchanges/`), live websocket-фиды, локальные стаканы, запись и replay (`realtime/`) |
 | `scalpr-trader` | `scalpr_trader` | paper-движок на live/записанных фидах: `engine`, `paper` (PaperQuotes), `basis`, `journal`, `dashboard` |
 | `scalpr-scanner` | `scalpr_scanner` | спред/базис, скринер, векторный XEMM-бэктест (`xemm.py`), walk-forward, токсичность, `paper-report` |
-| `scalpr-live` | `scalpr_live` | реальные аккаунты: подписанный REST Bybit v5 и HTX (V5), `live check` (только чтение); слой ордеров (`orders`, `hedger`, `trader`) с симулятором бирж для dry run (`sim`) |
+| `scalpr-live` | `scalpr_live` | реальные аккаунты: подписанный REST Bybit v5 и HTX (V5), `live check` (только чтение); слой ордеров (`orders`, `hedger`, `trader`) с симулятором бирж для dry run (`sim`) и реальными адаптерами (`real`, приватные WS `private`), `live probe` |
 
 Зависимости: strategy ← trader ← scanner (scanner импортирует `scalpr_trader.config/journal` и глубины фидов); trader ← live.
 Формулы стратегии не дублировать: и бэктест (`scanner/xemm.py`), и трейдер (`trader/engine.py`) берут их из `scalpr_strategy`.
@@ -50,6 +50,8 @@ uv run --package scalpr-trader trader --config <trader.toml> [--minutes N] [--re
 uv run --package scalpr-scanner paper-report [data/paper/<start>] [--source auto|archive|<recording>]
 uv run --package scalpr-live live check [--config trader.toml]   # реальные аккаунты, только чтение
 uv run --package scalpr-live live run --config <trader.toml> [--minutes N] [--replay DIR]   # dry run: ордера не уходят
+uv run --package scalpr-live live probe [--rounds N]   # план замера задержки ордеров; с --real — РЕАЛЬНЫЕ ордера
+#   live run --real — РЕАЛЬНАЯ торговля; --real запускает только пользователь (пример: packages/live/live.example.toml)
 uv run ruff check .
 ```
 

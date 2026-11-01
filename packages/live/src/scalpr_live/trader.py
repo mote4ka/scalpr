@@ -1,6 +1,6 @@
 import math
 import time
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from itertools import count
 from typing import Protocol
@@ -19,6 +19,7 @@ from scalpr_live.specs import Spec, steps
 
 SNAPSHOT = 10_000_000_000  # ns, journal snapshots every 10 s
 SECOND = 1_000_000_000
+MAX_REJECTS, REJECT_WINDOW = 5, 60 * SECOND  # this many rejected orders within the window halt quoting
 
 
 # BUDGET: requests per second to one exchange, a token bucket holding a second's worth; the last `reserve` share is
@@ -47,6 +48,7 @@ class Exchange(Protocol):
     def hedge(self, ticker: str, coins: float, limit: float, now: int) -> None: ...
     def tick(self, now: int) -> None: ...
     def on_trade(self, trade: TradeEvent) -> None: ...
+    def trouble(self) -> str | None: ...  # a reason to halt seen by the exchange side (a private feed down, ...)
 
 
 @dataclass
@@ -79,13 +81,23 @@ class LiveTrader:
                                             Hedger(specs[coin.ticker]))
                       for coin in config.coins}
         self.exchange: Exchange | None = None
+        self.real = False  # the orders go to the exchanges (the dashboard says so)
         self.halted: str | None = None
+        self.rejects: deque[int] = deque()  # when orders were rejected lately
         self.now = self.next_snapshot = self.turn = 0
         self.budget = Budget(settings.max_requests)  # of the maker exchange, shared by all coins
         self.deferred = 0  # times the budget said wait (the request is tried again with the next step)
         self.requests: Counter[str] = Counter()  # sent to each exchange
         self.per_second: Counter[tuple[str, int]] = Counter()
         self.peak: Counter[str] = Counter()  # most requests to an exchange within one second
+
+    # positions an earlier run left, (htx coins, bybit coins) per coin: what one leg holds beyond the other is owed
+    # to the hedge. Cash starts at zero, so the pnl counts the legs at their mids (about zero for hedged legs).
+    def restore(self, positions: dict[str, tuple[float, float]]) -> None:
+        for ticker, (maker, hedge) in positions.items():
+            live = self.coins[ticker]
+            live.account.maker, live.account.hedge = maker, hedge
+            live.hedger.owed = round(-(maker + hedge), 10)
 
     def on_event(self, event: Event) -> None:
         self.engine.on_event(event)
@@ -171,6 +183,9 @@ class LiveTrader:
             self.halt(now, reason)
 
     def halt_reason(self, now: int) -> str | None:
+        trouble = self.exchange.trouble()
+        if trouble:
+            return trouble
         for live in self.coins.values():
             book = self.engine.coins[live.coin.ticker].books[self.hedge]
             mid = _mid(book) if book is not None else math.nan
@@ -197,25 +212,33 @@ class LiveTrader:
         order = self.coins[ticker].orders.answered(order_id, live)
         if order is not None:
             self.write("orders", {"t": now, "event": "live" if live else "rejected", **_order(order)})
+        # an exchange turning orders down (no margin, a bad price) would be asked again and again
+        if not live:
+            self.rejects.append(now)
+            while self.rejects and now - self.rejects[0] > REJECT_WINDOW:
+                self.rejects.popleft()
+            if len(self.rejects) >= MAX_REJECTS and not self.halted:
+                self.halt(now, f"{len(self.rejects)} orders rejected within {REJECT_WINDOW // SECOND} s")
 
     def canceled(self, ticker: str, order_id: int, now: int) -> None:
         order = self.coins[ticker].orders.canceled(order_id)
         if order is not None:
             self.write("orders", {"t": now, "event": "canceled", **_order(order)})
 
-    def filled(self, ticker: str, order_id: int, contracts: int, price: float, now: int) -> None:
+    # a maker fill; booked and hedged even when the order is no longer tracked (a fill racing its cancel)
+    def filled(self, ticker: str, order_id: int, contracts: int, price: float, bid: bool, now: int) -> None:
         live = self.coins[ticker]
-        order = live.orders.filled(order_id, contracts)
-        if order is None:
-            logger.warning(f"{ticker}: fill of an unknown order {order_id}")
-            return
+        if live.orders.filled(order_id, contracts) is None:
+            logger.warning(f"{ticker}: fill of an order no longer tracked ({order_id}), booked and hedged")
         coins = contracts * live.spec.contract
-        fee = live.account.trade(True, coins if order.bid else -coins, price, self.config.fees[0])
-        live.hedger.on_fill(order.bid, coins)
-        live.fills[order.bid] += 1
+        fee = live.account.trade(True, coins if bid else -coins, price, self.config.fees[0])
+        live.hedger.on_fill(bid, coins)
+        live.fills[bid] += 1
         live.volume += coins * price
-        self.write("fills", {"t": now, "ticker": ticker, "id": order_id, "buys": order.bid, "price": price, "contracts": contracts,
+        self.write("fills", {"t": now, "ticker": ticker, "id": order_id, "buys": bid, "price": price, "contracts": contracts,
                              "coins": coins, "fee": fee, "fair": self.engine.coins[ticker].fair})
+        # the hedge goes out now, not with the next market event
+        self.send_hedge(live, now)
 
     def hedged(self, ticker: str, sent: float, filled: float, price: float, now: int) -> None:
         live = self.coins[ticker]

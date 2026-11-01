@@ -69,6 +69,9 @@ class Silent:
     def on_trade(self, trade):
         pass
 
+    def trouble(self):
+        return None
+
 
 def test_orders_are_real_contracts_edge_away_from_fair():
     trader = warm_trader()
@@ -134,12 +137,38 @@ def test_an_unhedged_fill_halts_quoting_but_hedging_goes_on():
     live = trader.coins[TICKER]
     for order in live.orders.sides.values():
         trader.answered(TICKER, order.id, True, T0 + SECOND + 100 * MS)
-    trader.filled(TICKER, live.orders.sides[True].id, 10, 99.8, T0 + SECOND + 200 * MS)
+    trader.filled(TICKER, live.orders.sides[True].id, 10, 99.8, True, T0 + SECOND + 200 * MS)
     trader.on_event(book_event("bybit", T0 + SECOND + 210 * MS, 99.99, 100.01))
     assert ("hedge", pytest.approx(-1.0)) in silent.sent
     for second in range(2, 9):
         trader.on_event(book_event("bybit", T0 + second * SECOND, 99.99, 100.01))
     assert trader.halted and "unhedged" in trader.halted
+
+
+def test_a_fill_of_an_order_no_longer_tracked_is_still_booked_and_hedged():
+    silent = Silent()
+    trader = warm_trader(exchange=silent)
+    live = trader.coins[TICKER]
+    trader.filled(TICKER, 999, 5, 100.2, False, T0 + SECOND + 300 * MS)  # an ask cancelled here but filled there
+    assert live.account.maker == pytest.approx(-0.5) and live.hedger.owed == pytest.approx(0.5)
+    assert ("hedge", pytest.approx(0.5)) in silent.sent
+
+
+def test_orders_rejected_again_and_again_halt_quoting():
+    trader = warm_trader(exchange=Silent())
+    live = trader.coins[TICKER]
+    for n in range(5):
+        now = T0 + SECOND + n * 100 * MS
+        trader.answered(TICKER, live.orders.sides[True].id, False, now)
+        trader.step(now + MS)  # the bid goes out again
+    assert trader.halted and "5 orders rejected" in trader.halted
+
+
+def test_restore_takes_over_positions_and_owes_the_difference():
+    trader = warm_trader(exchange=Silent())
+    trader.restore({TICKER: (3.0, -2.9)})
+    live = trader.coins[TICKER]
+    assert (live.account.maker, live.account.hedge, live.hedger.owed) == (3.0, -2.9, pytest.approx(-0.1))
 
 
 def test_ioc_take_stops_at_the_limit():

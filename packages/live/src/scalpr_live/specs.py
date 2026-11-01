@@ -1,5 +1,6 @@
 import math
 from dataclasses import dataclass
+from decimal import Decimal
 
 import aiohttp
 from scalpr_collector.exchanges import htx as htx_rest
@@ -23,6 +24,23 @@ class Spec:
     qty_step: float  # bybit order quantity step, coins
     min_qty: float  # bybit smallest order, coins
     min_notional: float  # bybit smallest order, USDT
+    hedge_tick: float = 0.0  # bybit price step
+
+    @property
+    def contract_code(self) -> str:  # htx: DOT-USDT
+        return f"{self.ticker.removesuffix('USDT')}-USDT"
+
+    # an htx price as the api takes it: on the tick grid, no float noise
+    def price_text(self, price: float) -> str:
+        return _text(round(price / self.tick) * self.tick, self.tick)
+
+    # a bybit limit price on its tick grid: rounded down for a buy, up for a sell, so it stays within the limit
+    def hedge_price_text(self, price: float, buy: bool) -> str:
+        ticks = math.floor(price / self.hedge_tick + EPSILON) if buy else math.ceil(price / self.hedge_tick - EPSILON)
+        return _text(ticks * self.hedge_tick, self.hedge_tick)
+
+    def qty_text(self, coins: float) -> str:
+        return _text(self.hedge_qty(coins), self.qty_step)
 
     # whole htx contracts of a quote worth `notional` USDT at `price`
     def contracts(self, notional: float, price: float) -> int:
@@ -55,5 +73,11 @@ async def load_specs(session: aiohttp.ClientSession, tickers: list[str]) -> dict
             raise SystemExit(f"not traded on bybit: {ticker}")
         lots = found[0]["lotSizeFilter"]
         specs[ticker] = Spec(ticker, htx[ticker]["tick"], htx[ticker]["size"], float(lots["qtyStep"]), float(lots["minOrderQty"]),
-                             float(lots.get("minNotionalValue") or 0))
+                             float(lots.get("minNotionalValue") or 0), float(found[0]["priceFilter"]["tickSize"]))
     return specs
+
+
+# `value` with as many decimals as `step` has: 0.0001 -> "0.9474"
+def _text(value: float, step: float) -> str:
+    decimals = max(0, -Decimal(repr(step)).normalize().as_tuple().exponent)
+    return f"{value:.{decimals}f}"

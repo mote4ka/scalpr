@@ -14,7 +14,8 @@ def _order(order: Order | None) -> str:
 # DASHBOARD: one row per coin, our orders as the trader sees them, both legs, and the paper twin's pnl next to ours
 def dashboard(trader: LiveTrader, title: str) -> Table:
     requests = ", ".join(f"{exchange} {trader.requests[exchange]} (peak {trader.peak[exchange]}/s)" for exchange in (trader.maker, trader.hedge))
-    caption = f"dry run, nothing is sent | requests: {requests} | budget refusals {trader.deferred}"
+    mode = "[bold red]REAL ORDERS[/]" if trader.real else "dry run, nothing is sent"
+    caption = f"{mode} | requests: {requests} | budget refusals {trader.deferred}"
     if trader.halted:
         caption += f" | [red]HALTED: {trader.halted}[/]"
     table = Table(title=title, caption=caption)

@@ -1,3 +1,4 @@
+import asyncio
 import math
 import statistics
 import time
@@ -13,6 +14,7 @@ from scalpr_trader.config import Config
 
 from scalpr_live.bybit import BybitError, BybitRest
 from scalpr_live.htx import SPOT_REST, HtxError, HtxRest
+from scalpr_live.private import BybitPrivate, HtxPrivate
 from scalpr_live.specs import Spec
 
 # ACCOUNT CHECK: read-only requests to both real accounts, nothing is changed or ordered.
@@ -274,11 +276,29 @@ def render(report: Report) -> Table:
     return table
 
 
+# the private websockets the order layer listens to: logged in and subscribed within `seconds`
+async def check_private(session: aiohttp.ClientSession, reports: dict[str, Report], seconds: float = 10) -> None:
+    keys = {"htx": (env.HTX_API_KEY, env.HTX_API_SECRET), "bybit": (env.BYBIT_API_KEY, env.BYBIT_API_SECRET)}
+    feeds = [kind(*keys[kind.exchange]) for kind in (HtxPrivate, BybitPrivate) if all(keys[kind.exchange])]
+    tasks = [asyncio.create_task(feed.run(session, lambda update: None)) for feed in feeds]
+    started = time.monotonic()
+    while time.monotonic() - started < seconds and not all(feed.ready for feed in feeds):
+        await asyncio.sleep(0.1)
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    for feed in feeds:
+        took = f"in {time.monotonic() - started:.1f} s" if feed.ready else f"not within {seconds:g} s: {feed.error}"
+        reports[feed.exchange].add("private websocket (orders)", f"{'logged in and subscribed' if feed.ready else 'FAILED'} {took}",
+                                   OK if feed.ready else BAD)
+
+
 async def run(config: Config) -> None:
     # trust_env: HTTP(S)_PROXY from the environment, as the collector does
     async with aiohttp.ClientSession(trust_env=True) as session:
         htx = await check_htx(session, config)
         bybit = await check_bybit(session, config)
+        await check_private(session, {"htx": htx, "bybit": bybit})
     coins, notes = sizing(config, htx, bybit)
     for table in (render(htx), render(bybit), coins):
         console.print(table)

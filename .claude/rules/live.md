@@ -16,9 +16,42 @@ paths:
   `METHOD\nhost\npath\nsorted-query`, POST подписывает только auth-параметры, тело — JSON отдельно.
 - `live check` — только чтение: ключи и права, баланс, режимы, комиссии аккаунта, размеры контрактов против конфига,
   минимальный хедж, маржа, открытые позиции/ордера, задержка REST. Тесты — `packages/live/tests`.
-- `live run` — **dry run** слоя ордеров: живые ленты или `--replay` записи, биржи — `sim.SimExchange`, ничего не
-  отправляется. Журнал `data/live/<start>/`: `orders|fills|hedges|snapshots|halts|specs.jsonl`, `run.json`.
-  Реальных адаптеров бирж (выставление ордеров, приватные WS) ещё нет.
+- `live run` — слой ордеров: живые ленты или `--replay` записи; по умолчанию **dry run** (`sim.SimExchange`, ничего не
+  отправляется), с `--real` — `real.RealExchange`. Журнал `data/live/<start>/`:
+  `orders|fills|hedges|snapshots|halts|specs|errors|positions.jsonl`, `run.json` (`dry_run`).
+- `live probe [--rounds N] [--real]` — задержка ордеров: post_only-покупка DOT на 3% ниже bid (HTX 1 контракт,
+  Bybit минимум $5), сразу отмена; REST place/cancel и время до push в приватном WS. Без `--real` только план.
+  В начале и в конце `real.prepare` (отменить всё, показать позиции).
+- `live.example.toml` — первый реальный запуск на ~$10 на биржу (котировка $10, лимит $20/монету, `hedge_fee = 0.1`,
+  `max_loss = 3`); копию держать в `data/` (не коммитится).
+- **Реальных ордеров ещё не было** (на 01.11.2026): адаптеры проверены тестами на поддельной бирже, приватные WS —
+  входом и подпиской на реальных субаккаунтах. Первый реальный шаг — `live probe --real` (запускает пользователь).
+
+## Реальный режим (`real.py`, `private.py`)
+
+- Приватные WS: HTX `wss://api.hbdm.com/ws/v5/notification` (auth `{"op":"auth","type":"api",AccessKeyId,…,Signature}`,
+  подпись как GET пути `/ws/v5/notification`; gzip; сервер шлёт `{"op":"ping"}` ~раз в 10 s → `pong`; подписка
+  `{"op":"sub","topic":"orders","contract_code":"*"}`). Bybit `wss://stream.bybit.com/v5/private` (auth
+  `{"op":"auth","args":[key, expires_ms, hex HMAC("GET/realtime"+expires)]}`, ping каждые 20 s, топик `order`).
+  Оба сообщения приводятся к `OrderUpdate` (накопительно: исполнено, оборот USDT, финальное ли состояние).
+- HTX `orders`: состояния new / partially_filled / filled / partially_canceled / canceled; финал — когда
+  `trade_volume + cancel_volume == volume` (несколько push «filled» на один матч). Fill = прирост `trade_volume`,
+  цена = прирост `trade_turnover` / (контракты × размер контракта).
+- `RealExchange`: maker — `POST /v5/trade/order` post_only one-way cross с нашим `client_order_id` (целое, из
+  времени старта); отмена `/v5/trade/cancel_order` (1061 «нет ордера» — не ошибка, итог скажет WS; иначе 2 попытки);
+  хедж — Bybit `POST /v5/order/create` Limit IOC с лимитом `hedge_slippage`, `orderLinkId` `x<ms>-<n>`, ответ — финальный
+  push. Отказ биржи → ответ сразу (rejected / хедж с нулём); таймаут запроса → ждём WS, нет ответа → таймауты трейдера.
+  `cancel-after` (5 s) обновляется каждые 1.5 s; 3 сбоя подряд → остановка. Fill по уже забытому ордеру всё равно
+  учитывается и хеджируется (`Listener.filled` получает сторону).
+- Старт (`go_real`): приватные WS готовы → `prepare` (отменить все ордера субаккаунтов, проверить, что их не осталось,
+  прочитать позиции; позиция в монете не из конфига — отказ) → ноги, которые не гасят друг друга больше
+  минимального хеджа, — отказ; иначе `LiveTrader.restore`. Выход (любой): `RealExchange.close` — снять все ордера HTX.
+- Остановки реального режима сверх dry run: приватный WS упал (`trouble`, навсегда до рестарта), 5 отказов в ордерах
+  за минуту, сбои `cancel-after`. При остановке котировки снимаются, хеджи продолжаются; ноги, не сошедшиеся из-за
+  потерянных ответов, всплывут при следующем старте (`prepare` откажет).
+- Лимиты HTX V5: торговые 72 запроса / 3 s на UID, чтение 72 / 3 s; `cancel-after` ≥ 5000 ms и снимает **все**
+  ордера аккаунта — поэтому только субаккаунт бота. Источник: официальная SPA-документация HTX (читается
+  через встроенный браузер, WebFetch пустой), раздел «USDT-Margined Futures Multi-Assets Collateral».
 
 ## Как устроен слой ордеров
 
@@ -70,12 +103,12 @@ paths:
 - HTX V5 (хост `api.hbdm.com`, подпись та же, ответ `{"code": 200, "data"}`): GET `/v5/account/balance`,
   `/v5/account/asset_mode`, `/v5/position/mode` (`single_side`), `/v5/position/lever?contract_code&margin_mode=cross`,
   `/v5/trade/position/opens`, `/v5/trade/order/opens`, `/v5/trade/order`, `/v5/trade/order/details`.
-  POST (по ccxt, ещё не вызывались): `/v5/trade/order` (`contract_code, volume` в контрактах, `side`, `type`
-  `limit|post_only|market`, `price`, `margin_mode`, `position_side` `both`, `client_order_id`, `reduce_only`),
-  `/v5/trade/batch_orders`, `/v5/trade/cancel_order`, `/v5/trade/cancel_batch_orders`, `/v5/trade/cancel_all_orders`,
-  **`/v5/trade/cancel-after`** (автоотмена при молчании клиента), `/v5/position/lever`. Лимит ~24 торговых запроса/с.
-  Приватный websocket V5 ещё не изучен. Официальная страница доков — SPA (WebFetch пустой); источники: ccxt `htx.py`,
-  github.com/htx-exchange/htx-skills-hub.
+  POST (официальные доки, вызовов ещё не было): `/v5/trade/order` (`contract_code, margin_mode, side, type`
+  `limit|post_only|market`, `price`, `volume` строкой в контрактах, `position_side` `both`, `client_order_id` целое
+  1…2^63−1, `reduce_only`, `time_in_force` gtc|ioc|fok), `/v5/trade/cancel_order` (`contract_code` + `order_id` или
+  `client_order_id`), `/v5/trade/cancel_all_orders` (`contract_code`, `side` — необязательны),
+  **`/v5/trade/cancel-after`** (`on_off` "1"/"0", `time_out` ≥ 5000 ms), `/v5/trade/batch_orders`,
+  `/v5/position/lever`. GET `/v5/trade/position/opens`: `contract_code, direction buy|sell, volume` (контракты), …
 - Состояние ключей, балансы и позиции аккаунтов — в личной памяти Claude, не в репозитории (он публичный);
   актуальное — `live check`. Bybit UTA, `REGULAR_MARGIN`, one-way.
 - **Комиссии аккаунта Bybit: maker 0.036%, taker 0.10% на всех линейных парах** (модель `FEES`: taker 0.055%).
@@ -98,12 +131,11 @@ skew 0.1: 41.1 → 22.5 (14/14), то есть ~$3.2/день на две мон
 1. Готово: `live check`.
 2. Готово: комиссии аккаунта в конфиге (`maker_fee`/`hedge_fee`).
 3. Готово: слой ордеров + dry run (`live run`, симулятор бирж, paper-двойник, бюджет запросов, остановки).
-4. Дальше: реальные адаптеры с тем же интерфейсом, что `sim.SimExchange` (`place/cancel/hedge/tick/on_trade` +
-   ответы `answered/canceled/filled/hedged`): HTX V5 post_only + приватный WS (fills, ответы; формат ещё изучить),
-   Bybit IOC + приватный WS; `cancel-after` на HTX; при старте — отмена своих ордеров (id из своего диапазона) и сверка
-   позиций обеих бирж с `Account`, периодическая сверка.
-5. Замер задержки с VPS: post_only далеко от рынка (не исполнятся) + отмена — запускает пользователь.
-6. Минимальный размер (котировка ~$10–20, лимит ~$30), 1–2 недели сравнения с двойником, потом рост.
+4. Готово: реальные адаптеры (`real.py`, `private.py`), `live probe`, пример `live.example.toml`.
+5. Дальше (запускает пользователь): `live probe --real` с ПК, потом с VPS; затем `live run --real` на ~$10.
+   Не сделано: периодическая сверка позиций во время работы (только при старте), опрос REST вместо потерянных
+   push'ей, переподключение приватного WS без остановки, ключи с привязкой к IP VPS, деплой `scalpr-live` на VPS.
+6. 1–2 недели на минимальном размере со сравнением с двойником, потом рост.
 
 Предусловия (на стороне пользователя): деньги на фьючерсных счетах; отдельные субаккаунты под бота (не делить маржу
 с ручными позициями); ключи с привязкой к IP VPS; вход на VPS только по ключам; точные часы там, где запущен бот.

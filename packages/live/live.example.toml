@@ -1,0 +1,23 @@
+# the first real run: ~$10 on each exchange. Copy to data/live.toml (data/ is never committed) and run
+#   uv run --package scalpr-live live check --config data/live.toml
+#   uv run --package scalpr-live live run --config data/live.toml              # dry run first
+#   uv run --package scalpr-live live run --config data/live.toml --real       # REAL ORDERS
+# keys: HTX_API_KEY/SECRET and BYBIT_API_KEY/SECRET in .env, of subaccounts that hold nothing but the bot
+
+[trader]
+maker = "htx"
+notional = 10            # USDT per quote: DOT 10 contracts, AVAX 1 contract
+max_position = 20        # USDT per coin on each leg; a ~24 % move of both coins against one leg before liquidation
+quote_latency = "100ms"  # only for the paper twin
+hedge_latency = "20ms"   # only for the paper twin
+skew = 0.1               # % both quotes lean against the inventory at max_position
+hedge_fee = 0.1          # % per bybit taker hedge of this account (the standard tier is 0.055)
+
+[coins.DOTUSDT]
+edge = 0.25
+
+[coins.AVAXUSDT]
+edge = 0.2
+
+[live]
+max_loss = 3             # USDT: quoting halts below this marked pnl of the run
