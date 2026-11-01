@@ -1,0 +1,27 @@
+[project]
+name = "scalpr-live"
+version = "0.1.0"
+description = "Real accounts through the exchanges' private APIs: account checks first, then the order layer"
+authors = [
+    { name = "Матвей", email = "tochnonebolotnyaytka@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "scalpr-core",
+    "scalpr-strategy",
+    "scalpr-trader",
+    "aiohttp",
+    "rich",
+]
+
+[project.scripts]
+live = "scalpr_live:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+scalpr-core = { workspace = true }
+scalpr-strategy = { workspace = true }
+scalpr-trader = { workspace = true }

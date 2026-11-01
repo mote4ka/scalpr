@@ -17,6 +17,7 @@ resolution-markers = [
 members = [
     "scalpr-collector",
     "scalpr-core",
+    "scalpr-live",
     "scalpr-scanner",
     "scalpr-strategy",
     "scalpr-trader",
@@ -1111,6 +1112,27 @@ dependencies = [
 requires-dist = [
     { name = "python-dotenv" },
     { name = "rich" },
+]
+
+[[package]]
+name = "scalpr-live"
+version = "0.1.0"
+source = { editable = "packages/live" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "rich" },
+    { name = "scalpr-core" },
+    { name = "scalpr-strategy" },
+    { name = "scalpr-trader" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiohttp" },
+    { name = "rich" },
+    { name = "scalpr-core", editable = "packages/core" },
+    { name = "scalpr-strategy", editable = "packages/strategy" },
+    { name = "scalpr-trader", editable = "packages/trader" },
 ]
 
 [[package]]
