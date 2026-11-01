@@ -10,7 +10,16 @@ from scalpr_collector.realtime.events import (
     HeartbeatEvent,
     TradeEvent,
 )
-from scalpr_strategy import FEES, Ledger, fair_price, markout, quote_prices
+from scalpr_strategy import (
+    FEES,
+    Ledger,
+    Volatility,
+    fair_price,
+    inventory_shift,
+    markout,
+    quote_edge,
+    quote_prices,
+)
 
 from scalpr_trader.basis import SAMPLE, Basis
 from scalpr_trader.config import Coin, Config
@@ -43,6 +52,8 @@ class CoinState:
         self.quotes = PaperQuotes(config.quote_latency)
         self.ledger = Ledger()
         self.basis = Basis(config.basis_window, config.warmup)
+        self.vol = Volatility(config.vol_window)  # of the hedge mid, sampled with the basis
+        self.edge = coin.edge  # % of the last quotes: coin.edge plus the volatility part
         self.books: dict[str, OrderBook | None] = {"bybit": None, "htx": None}
         # maker book best prices by exchange time: the one right before a trade tells if our quote was the best
         self.maker_tops: deque[tuple[int, float, float]] = deque(maxlen=50)
@@ -108,6 +119,7 @@ class Engine:
                 deviation = self.deviation(state, now)
                 if not math.isnan(deviation):
                     state.basis.add(now, deviation)
+                    state.vol.add(now, _mid(state.books[self.hedge]))
                 # a silent feed pulls the quotes even when no event comes for that coin
                 self.requote(state, now)
         if now >= self.next_snapshot:
@@ -136,8 +148,10 @@ class Engine:
         else:
             maker_book = state.books[self.maker]
             state.fair = fair_price(_mid(state.books[self.hedge]), state.basis.value, self.maker)
-            bid, ask = quote_prices(state.fair, coin.edge, state.tick, maker_book.best_bid(), maker_book.best_ask())
             exposure = state.ledger.inventory * state.fair
+            state.edge = float(quote_edge(coin.edge, coin.vol_edge, state.vol.value))
+            shift = inventory_shift(exposure, coin.max_position, coin.skew)
+            bid, ask = quote_prices(state.fair, state.edge, state.tick, maker_book.best_bid(), maker_book.best_ask(), self.config.anchor, shift)
             want = {True: bid if exposure < coin.max_position else None, False: ask if -exposure < coin.max_position else None}
             # an empty side of the maker book leaves nothing to price against
             for side, price in want.items():
@@ -197,6 +211,7 @@ class Engine:
     def snapshot(self, state: CoinState, now: int) -> dict:
         return {
             "t": now, "ticker": state.coin.ticker, "status": state.status, "basis": state.basis.value, "fair": state.fair,
+            "edge": state.edge, "vol": state.vol.value,
             "bid": state.sent[True], "ask": state.sent[False], "inventory": state.ledger.inventory, "cash": state.ledger.cash,
             "fees": state.ledger.fees, "pnl": self.pnl(state),
         }

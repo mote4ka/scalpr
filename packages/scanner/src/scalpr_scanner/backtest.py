@@ -10,7 +10,7 @@ from scalpr_collector.http_client import SessionManager
 from scalpr_collector.storage import write_parquet
 from scalpr_core.logger import console, logger
 from scalpr_core.paths import DATA_DIR
-from scalpr_strategy import FILL_RULES
+from scalpr_strategy import ANCHORS, FILL_RULES
 
 from scalpr_scanner.history import last_complete_day, load_day
 from scalpr_scanner.screener import SCREENS_DIR
@@ -34,6 +34,12 @@ def main() -> None:
     parser.add_argument("--max-position", type=float, default=300, help="a side stops quoting at this inventory in USDT (default 300)")
     parser.add_argument("--fill", choices=FILL_RULES, default="through", help="fill rule when our quote is level with the book (default through)")
     parser.add_argument("--latencies", default="0ms", help="delays from a fill to the hedge and, with tick quotes, of every quote change; comma separated (default 0ms)")
+    parser.add_argument("--hedge-latency", help="delay from a fill to the hedge when it differs from --latencies, e.g. 20ms")
+    parser.add_argument("--anchor", choices=ANCHORS, default="fair",
+                        help="fair: quotes edge %% from fair (default); book: also no more than a tick better than the htx book")
+    parser.add_argument("--vol-edge", type=float, default=0.0, help="edge grows by this times the bybit mid volatility, std of 1 s returns in %% (default 0)")
+    parser.add_argument("--vol-window", default="5min", help="window of that volatility (default 5min)")
+    parser.add_argument("--skew", type=float, default=0.0, help="%% both quotes lean against the inventory at --max-position (default 0)")
     parser.add_argument("--quotes", choices=QUOTE_MODES, default="tick", help="quotes follow every hedge book update (tick, default) or one per grid step (grid)")
     parser.add_argument("--depth", type=int, default=20, help="book levels to load (default 20)")
     parser.add_argument("--freq", default="1s", help="quote refresh step (default 1s)")
@@ -104,8 +110,10 @@ async def run(tickers: list[str], days: list[date], edges: list[float], latencie
             # share of the day both books are there (a partial htx day is shorter)
             coverage = (grid["bybit"]["mid"].notna() & grid["htx"]["mid"].notna()).mean()
             for latency, edge in product(latencies, edges):
-                result = xemm(spreads, basis_line, native, grid, tape, "htx", args.notional, edge, args.max_position, args.fill, latency, args.quotes)
-                rows.append({"quotes": args.quotes, "latency": latency, **summary(ticker, day, edge, coverage, result)})
+                result = xemm(spreads, basis_line, native, grid, tape, "htx", args.notional, edge, args.max_position, args.fill, latency, args.quotes,
+                              args.hedge_latency, args.anchor, args.vol_edge, args.skew, args.vol_window)
+                rows.append({"quotes": args.quotes, "latency": latency, "hedge latency": args.hedge_latency or latency, "anchor": args.anchor,
+                             "vol edge": args.vol_edge, "skew": args.skew, **summary(ticker, day, edge, coverage, result)})
     finally:
         await manager.closeSession()
     return DataFrame(rows)

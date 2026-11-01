@@ -3,3 +3,8 @@ members = ["packages/*"]
 
 [dependency-groups]
 dev = ["ruff", "pytest"]
+
+[tool.pytest.ini_options]
+# tests live next to each package: packages/<name>/tests
+testpaths = ["packages"]
+addopts = "--import-mode=importlib"

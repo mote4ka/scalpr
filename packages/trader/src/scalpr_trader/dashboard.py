@@ -28,7 +28,7 @@ def dashboard(engine: Engine, title: str) -> Table:
         table.add_row(
             ticker,
             f"warmup {_clock(state.basis.left(engine.now))}" if state.status == "warmup" else state.status,
-            f"{state.coin.edge:g}",
+            f"{state.edge:.3g}",
             _number(state.basis.value, "{:+.3f}"),
             _number(state.fair, "{:.6g}"),
             _number(state.sent[True], "{:.6g}"),

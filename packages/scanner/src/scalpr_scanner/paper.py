@@ -157,7 +157,8 @@ async def backtest(run: Run, source: str) -> dict[str, Xemm]:
         line = basis(spreads, f"{config.basis_window}ns", f"{config.warmup}ns")
         spreads, line, grid = spreads.loc[start:], line.loc[start:], {exchange: prices.loc[start:] for exchange, prices in grid.items()}
         results[coin.ticker] = xemm(spreads, line, native, grid, htx_trades, config.maker, coin.notional, coin.edge, coin.max_position,
-                                    config.fill, f"{config.quote_latency}ns", "tick", f"{config.hedge_latency}ns")
+                                    config.fill, f"{config.quote_latency}ns", "tick", f"{config.hedge_latency}ns",
+                                    config.anchor, coin.vol_edge, coin.skew, f"{config.vol_window}ns")
     return results
 
 

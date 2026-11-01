@@ -2,7 +2,16 @@ from dataclasses import dataclass
 
 import numpy as np
 from pandas import DataFrame, Series, Timedelta, Timestamp
-from scalpr_strategy import FEES, Ledger, fair_price, filled, markout, quote_prices
+from scalpr_strategy import (
+    FEES,
+    Ledger,
+    fair_price,
+    filled,
+    inventory_shift,
+    markout,
+    quote_edge,
+    quote_prices,
+)
 
 from scalpr_scanner.maker import Book, Tape
 
@@ -31,9 +40,13 @@ class Xemm:
 # `quotes` (see QUOTE_MODES): with "tick" a trade meets the quote made from the books `latency` before it, so a move
 # of the hedge exchange can catch a quote that is not replaced yet; the curve still shows the grid step quotes
 # a quote is filled by the trades that come while it stands (see scalpr_strategy.filled)
+# dynamic quotes, as in the trader (scalpr_strategy.quote_prices): `anchor` "book" keeps a quote no more than a tick
+# better than the maker book; `vol_edge` adds that many times the hedge mid volatility over `vol_window` to the edge;
+# `skew` % leans both quotes against the inventory; with any of them a quote whose price changes is a new quote
 def xemm(spreads: DataFrame, basis: Series, native: dict[str, DataFrame], grid: dict[str, DataFrame], trades: DataFrame,
          maker: str, notional: float, edge: float, max_position: float, rule: str, latency: str, quotes: str = "tick",
-         hedge_latency: str | None = None) -> Xemm:
+         hedge_latency: str | None = None, anchor: str = "fair", vol_edge: float = 0.0, skew: float = 0.0,
+         vol_window: str = "5min") -> Xemm:
     taker = "htx" if maker == "bybit" else "bybit"
     fair = fair_price(grid[taker]["mid"], basis, maker).to_numpy()
     best_bid, best_ask = grid[maker]["bid"].to_numpy(), grid[maker]["ask"].to_numpy()
@@ -47,11 +60,27 @@ def xemm(spreads: DataFrame, basis: Series, native: dict[str, DataFrame], grid: 
     # the hedge takes `latency` too unless it has its own
     hedge_delay = Timedelta(hedge_latency).value if hedge_latency is not None else delay
     n = len(ts)
+    dynamic = anchor != "fair" or bool(vol_edge) or bool(skew)
 
-    # quotes of every step
+    # edge of every step: the volatility is the std of the hedge mid's returns over `vol_window`, per second, %, the
+    # same as scalpr_strategy.Volatility in the trader (unknown until half the window is there)
+    edges = edge
+    if vol_edge:
+        window = max(2, round(Timedelta(vol_window).value / step))
+        returns = np.log(Series(taker_mid)).diff() * 100
+        vol = returns.rolling(window, min_periods=max(2, window // 2)).std().to_numpy() / np.sqrt(step / 1e9)
+        edges = quote_edge(edge, vol_edge, vol)
+
+    def edge_at(k: int) -> float:
+        return edges[k] if isinstance(edges, np.ndarray) else edges
+
+    def edge_part(start: int, end: int):
+        return edges[start:end] if isinstance(edges, np.ndarray) else edges
+
+    # quotes of every step, before the inventory skew
     quoting = ~np.isnan(fair + best_bid + best_ask)
     with np.errstate(invalid="ignore"):
-        quote_bids, quote_asks = quote_prices(fair, edge, tick, best_bid, best_ask)
+        quote_bids, quote_asks = quote_prices(fair, edges, tick, best_bid, best_ask, anchor)
     # step k takes the trades in (ts[k], ts[k] + step]
     trade_steps = np.searchsorted(ts, tape.ts, side="left") - 1
     in_day = (trade_steps >= 0) & (tape.ts <= ts[-1] + step)
@@ -64,8 +93,13 @@ def xemm(spreads: DataFrame, basis: Series, native: dict[str, DataFrame], grid: 
     def carry(start: int, end: int) -> None:
         with np.errstate(invalid="ignore"):
             exposure = ledger.inventory * fair[start:end]
-            bids[start:end] = np.where(quoting[start:end] & (exposure < max_position), quote_bids[start:end], np.nan)
-            asks[start:end] = np.where(quoting[start:end] & (-exposure < max_position), quote_asks[start:end], np.nan)
+            if skew:
+                shift = inventory_shift(exposure, max_position, skew)
+                step_bids, step_asks = quote_prices(fair[start:end], edge_part(start, end), tick, best_bid[start:end], best_ask[start:end], anchor, shift)
+            else:
+                step_bids, step_asks = quote_bids[start:end], quote_asks[start:end]
+            bids[start:end] = np.where(quoting[start:end] & (exposure < max_position), step_bids, np.nan)
+            asks[start:end] = np.where(quoting[start:end] & (-exposure < max_position), step_asks, np.nan)
             inventories[start:end] = exposure
             pnl[start:end] = ledger.marked(maker_mid[start:end], taker_mid[start:end])
 
@@ -106,7 +140,8 @@ def xemm(spreads: DataFrame, basis: Series, native: dict[str, DataFrame], grid: 
         bid_then, ask_then = maker_book.at(at, "bid"), maker_book.at(at, "ask")
         if np.isnan(fair_then + bid_then + ask_then):
             return None
-        bid, ask = quote_prices(fair_then, edge, tick, bid_then, ask_then)
+        shift = inventory_shift(ledger.inventory * fair_then, max_position, skew)
+        bid, ask = quote_prices(fair_then, edge_at(step_of), tick, bid_then, ask_then, anchor, shift)
         return update, fair_then, bid, ask
 
     # size left of the standing bid (True) and ask (False), and the hedge book update each quote was made from
@@ -118,7 +153,11 @@ def xemm(spreads: DataFrame, basis: Series, native: dict[str, DataFrame], grid: 
     for k, first, last in zip(steps, np.searchsorted(trade_steps, steps, "left"), np.searchsorted(trade_steps, steps, "right"), strict=True):
         carry(done, k + 1)  # step k is quoted with the inventory it starts with
         if quotes == "grid" and quoting[k]:
-            bid, ask = quote_bids[k], quote_asks[k]
+            if skew:
+                shift = inventory_shift(ledger.inventory * fair[k], max_position, skew)
+                bid, ask = quote_prices(fair[k], edge_at(k), tick, best_bid[k], best_ask[k], anchor, shift)
+            else:
+                bid, ask = quote_bids[k], quote_asks[k]
             bid_left = notional / bid if ledger.inventory * fair[k] < max_position else 0.0
             ask_left = notional / ask if -ledger.inventory * fair[k] < max_position else 0.0
             for j in range(first, last):
@@ -144,9 +183,11 @@ def xemm(spreads: DataFrame, basis: Series, native: dict[str, DataFrame], grid: 
                     continue
                 update, fair_then, bid, ask = standing
                 quote = bid if buys else ask
-                if quote_update[buys] != update:
+                # dynamic quotes can move without a hedge book update: a new price is a new quote too
+                key = (update, quote) if dynamic else update
+                if quote_update[buys] != key:
                     # a new quote: full size, unless that side is at the inventory limit
-                    quote_update[buys] = update
+                    quote_update[buys] = key
                     exposure = ledger.inventory * fair_then if buys else -ledger.inventory * fair_then
                     left_by_side[buys] = notional / quote if exposure < max_position else 0.0
                 # the maker book right before the print tells if our quote was the best one
