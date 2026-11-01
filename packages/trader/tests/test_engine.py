@@ -146,6 +146,26 @@ def test_config_reads_the_new_settings(tmp_path):
         load(path)
 
 
+def test_decide_quotes_for_the_position_it_is_given():
+    engine = warm_engine(config())
+    state = engine.coins[TICKER]
+    decision = engine.decide(state, T0 + SECOND, inventory=3.0)  # someone else's $300 long
+    assert decision.status == "one side" and decision.bid is None and decision.ask == pytest.approx(100.2)
+    assert state.ledger.inventory == 0 and state.sent[True] == pytest.approx(99.8)  # the paper quotes are untouched
+    assert engine.decide(state, T0 + 20 * SECOND, inventory=0.0).status == "stale"
+
+
+def test_fees_come_from_the_config_or_the_standard_tier(tmp_path):
+    assert config().fees == (0.02, 0.055)
+    path = tmp_path / "trader.toml"
+    path.write_text('[trader]\nhedge_fee = 0.1\n\n[coins.DOTUSDT]\nedge = 0.25\n', encoding="utf-8")
+    assert load(path).fees == (0.02, 0.1)
+    engine = warm_engine(config(hedge_fee=0.1))
+    engine.on_event(trade(T0 + SECOND + 200 * MS, 99.5, 0.5, "sell"))
+    engine.tick(T0 + SECOND + 230 * MS)
+    assert engine.coins[TICKER].ledger.fees == pytest.approx((99.8 * 0.02 + 99.99 * 0.1) * 0.5 / 100)
+
+
 def test_config_of_an_older_journal_still_loads():
     raw = {"coins": [{"ticker": TICKER, "edge": 0.2, "notional": 100.0, "max_position": 300.0}], "maker": "htx",
            "quote_latency": 50 * MS, "hedge_latency": 50 * MS, "fill": "through", "basis_window": 3600 * SECOND,

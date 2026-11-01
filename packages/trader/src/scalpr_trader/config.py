@@ -3,7 +3,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from scalpr_strategy import ANCHORS, FILL_RULES
+from scalpr_strategy import ANCHORS, FEES, FILL_RULES
 
 UNITS = {"ms": 1_000_000, "s": 1_000_000_000, "min": 60_000_000_000, "h": 3_600_000_000_000}
 
@@ -41,10 +41,18 @@ class Config:
     warmup: int = duration("30min")  # no quotes until the basis has this much history, as in the backtest
     stale: int = duration("10s")  # quotes are pulled when nothing came from an exchange this long (heartbeats included)
     markout: int = duration("1min")
+    maker_fee: float | None = None  # % per maker fill on the quoted exchange; None: the standard tier of scalpr_strategy.FEES
+    hedge_fee: float | None = None  # % per taker hedge; None: scalpr_strategy.FEES
 
     @property
     def hedge(self) -> str:
         return "bybit" if self.maker == "htx" else "htx"
+
+    # % of the maker fill and of its hedge: the account's when the config gives them
+    @property
+    def fees(self) -> tuple[float, float]:
+        return (FEES[self.maker]["maker"] if self.maker_fee is None else self.maker_fee,
+                FEES[self.hedge]["taker"] if self.hedge_fee is None else self.hedge_fee)
 
 
 def load(path: Path) -> Config:
@@ -63,7 +71,8 @@ def load(path: Path) -> Config:
         raise ValueError(f"{path}: no [coins.<TICKER>] sections")
     durations = {name: duration(defaults[name]) for name in ("quote_latency", "hedge_latency", "basis_window", "warmup", "stale", "markout", "vol_window")
                  if name in defaults}
-    config = Config(coins, maker=defaults.get("maker", "htx"), anchor=defaults.get("anchor", "fair"), fill=defaults.get("fill", "through"), **durations)
+    fees = {name: float(defaults[name]) for name in ("maker_fee", "hedge_fee") if name in defaults}
+    config = Config(coins, maker=defaults.get("maker", "htx"), anchor=defaults.get("anchor", "fair"), fill=defaults.get("fill", "through"), **durations, **fees)
     if config.maker != "htx":
         raise ValueError("only maker = \"htx\" for now: quoting on bybit needs its price ticks")
     if config.fill not in FILL_RULES:

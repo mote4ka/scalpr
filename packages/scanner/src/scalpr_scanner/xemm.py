@@ -46,8 +46,11 @@ class Xemm:
 def xemm(spreads: DataFrame, basis: Series, native: dict[str, DataFrame], grid: dict[str, DataFrame], trades: DataFrame,
          maker: str, notional: float, edge: float, max_position: float, rule: str, latency: str, quotes: str = "tick",
          hedge_latency: str | None = None, anchor: str = "fair", vol_edge: float = 0.0, skew: float = 0.0,
-         vol_window: str = "5min") -> Xemm:
+         vol_window: str = "5min", maker_fee: float | None = None, hedge_fee: float | None = None) -> Xemm:
     taker = "htx" if maker == "bybit" else "bybit"
+    # % per trade: the account's when given, else the standard tier
+    maker_fee = FEES[maker]["maker"] if maker_fee is None else maker_fee
+    hedge_fee = FEES[taker]["taker"] if hedge_fee is None else hedge_fee
     fair = fair_price(grid[taker]["mid"], basis, maker).to_numpy()
     best_bid, best_ask = grid[maker]["bid"].to_numpy(), grid[maker]["ask"].to_numpy()
     maker_mid, taker_mid = grid[maker]["mid"].to_numpy(), grid[taker]["mid"].to_numpy()
@@ -109,7 +112,7 @@ def xemm(spreads: DataFrame, basis: Series, native: dict[str, DataFrame], grid: 
         if np.isnan(hedge):
             # book thinner than the notional: the best price is the closest guess
             hedge = hedges.at(tape.ts[j] + hedge_delay, "bid" if buys else "ask")
-        ledger.fill(buys, quote, qty, hedge, FEES[maker]["maker"], FEES[taker]["taker"])
+        ledger.fill(buys, quote, qty, hedge, maker_fee, hedge_fee)
         later = np.searchsorted(ts, tape.ts[j] + markout_after)
         fills.append({
             "ts": Timestamp(int(tape.ts[j]), tz="UTC"),
@@ -208,18 +211,18 @@ def xemm(spreads: DataFrame, basis: Series, native: dict[str, DataFrame], grid: 
     curve[["inventory", "pnl"]] = curve[["inventory", "pnl"]].ffill()
     # close at the last moment both books are there (a partial htx day ends earlier than bybit)
     both = np.flatnonzero(~np.isnan(maker_mid + taker_mid))
-    closed = _closed_pnl(ledger.cash, ledger.inventory, books, maker, taker, ts[both[-1]]) if len(both) else ledger.cash
+    closed = _closed_pnl(ledger.cash, ledger.inventory, books, maker, taker, ts[both[-1]], hedge_fee) if len(both) else ledger.cash
     return Xemm(DataFrame(fills, columns=FILL_COLUMNS), curve, closed, ledger.fees)
 
 
 # inventory closed with taker orders on both exchanges at `at`, fees included
-def _closed_pnl(cash: float, inventory: float, books: dict[str, Book], maker: str, taker: str, at: int) -> float:
+def _closed_pnl(cash: float, inventory: float, books: dict[str, Book], maker: str, taker: str, at: int, hedge_fee: float) -> float:
     if inventory == 0:
         return cash
     long = inventory > 0
     maker_exit = books[maker].at(at, "vwap_sell" if long else "vwap_buy")
     taker_exit = books[taker].at(at, "vwap_buy" if long else "vwap_sell")
-    fee = (maker_exit * FEES[maker]["taker"] + taker_exit * FEES[taker]["taker"]) * abs(inventory) / 100
+    fee = (maker_exit * FEES[maker]["taker"] + taker_exit * hedge_fee) * abs(inventory) / 100
     return cash + inventory * (maker_exit - taker_exit) - fee
 
 

@@ -40,6 +40,8 @@ def main() -> None:
     parser.add_argument("--vol-edge", type=float, default=0.0, help="edge grows by this times the bybit mid volatility, std of 1 s returns in %% (default 0)")
     parser.add_argument("--vol-window", default="5min", help="window of that volatility (default 5min)")
     parser.add_argument("--skew", type=float, default=0.0, help="%% both quotes lean against the inventory at --max-position (default 0)")
+    parser.add_argument("--maker-fee", type=float, help="%% per htx maker fill of your account (default: the standard tier in scalpr_strategy.FEES)")
+    parser.add_argument("--hedge-fee", type=float, help="%% per bybit taker hedge of your account, e.g. 0.1 (default: the standard tier)")
     parser.add_argument("--quotes", choices=QUOTE_MODES, default="tick", help="quotes follow every hedge book update (tick, default) or one per grid step (grid)")
     parser.add_argument("--depth", type=int, default=20, help="book levels to load (default 20)")
     parser.add_argument("--freq", default="1s", help="quote refresh step (default 1s)")
@@ -111,9 +113,10 @@ async def run(tickers: list[str], days: list[date], edges: list[float], latencie
             coverage = (grid["bybit"]["mid"].notna() & grid["htx"]["mid"].notna()).mean()
             for latency, edge in product(latencies, edges):
                 result = xemm(spreads, basis_line, native, grid, tape, "htx", args.notional, edge, args.max_position, args.fill, latency, args.quotes,
-                              args.hedge_latency, args.anchor, args.vol_edge, args.skew, args.vol_window)
+                              args.hedge_latency, args.anchor, args.vol_edge, args.skew, args.vol_window, args.maker_fee, args.hedge_fee)
                 rows.append({"quotes": args.quotes, "latency": latency, "hedge latency": args.hedge_latency or latency, "anchor": args.anchor,
-                             "vol edge": args.vol_edge, "skew": args.skew, **summary(ticker, day, edge, coverage, result)})
+                             "vol edge": args.vol_edge, "skew": args.skew, "maker fee": args.maker_fee, "hedge fee": args.hedge_fee,
+                             **summary(ticker, day, edge, coverage, result)})
     finally:
         await manager.closeSession()
     return DataFrame(rows)

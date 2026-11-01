@@ -11,7 +11,6 @@ from scalpr_collector.realtime.events import (
     TradeEvent,
 )
 from scalpr_strategy import (
-    FEES,
     Ledger,
     Volatility,
     fair_price,
@@ -27,6 +26,16 @@ from scalpr_trader.journal import Journal
 from scalpr_trader.paper import PaperQuotes
 
 SNAPSHOT = 10 * SAMPLE  # journal snapshots every 10 s
+
+
+# what the strategy wants on the maker exchange right now; a side at None quotes nothing
+@dataclass(frozen=True)
+class Decision:
+    status: str  # quoting / one side / no quotes / stale / warmup
+    bid: float | None = None
+    ask: float | None = None
+    fair: float = math.nan  # NaN when stale or warming up
+    edge: float = math.nan  # % of these quotes: coin.edge plus the volatility part
 
 
 @dataclass
@@ -138,29 +147,36 @@ class Engine:
     def stale(self, state: CoinState, now: int) -> bool:
         return any(book is None or now - self.seen[exchange] > self.config.stale for exchange, book in state.books.items())
 
-    def requote(self, state: CoinState, now: int) -> None:
+    # DECIDE: the quotes for `inventory` (coins on the maker exchange): the paper quotes pass the paper ledger's,
+    # a real order layer (scalpr_live) the real position, so both follow the same strategy
+    def decide(self, state: CoinState, now: int, inventory: float) -> Decision:
         coin = state.coin
-        want = {True: None, False: None}
         if self.stale(state, now):
-            state.status = "stale"
-        elif state.basis.value is None:
-            state.status = "warmup"
-        else:
-            maker_book = state.books[self.maker]
-            state.fair = fair_price(_mid(state.books[self.hedge]), state.basis.value, self.maker)
-            exposure = state.ledger.inventory * state.fair
-            state.edge = float(quote_edge(coin.edge, coin.vol_edge, state.vol.value))
-            shift = inventory_shift(exposure, coin.max_position, coin.skew)
-            bid, ask = quote_prices(state.fair, state.edge, state.tick, maker_book.best_bid(), maker_book.best_ask(), self.config.anchor, shift)
-            want = {True: bid if exposure < coin.max_position else None, False: ask if -exposure < coin.max_position else None}
-            # an empty side of the maker book leaves nothing to price against
-            for side, price in want.items():
-                if price is not None and math.isnan(price):
-                    want[side] = None
-            state.status = "quoting" if None not in want.values() else "one side" if any(want.values()) else "no quotes"
+            return Decision("stale")
+        if state.basis.value is None:
+            return Decision("warmup")
+        maker_book = state.books[self.maker]
+        fair = fair_price(_mid(state.books[self.hedge]), state.basis.value, self.maker)
+        exposure = inventory * fair
+        edge = float(quote_edge(coin.edge, coin.vol_edge, state.vol.value))
+        shift = inventory_shift(exposure, coin.max_position, coin.skew)
+        bid, ask = quote_prices(fair, edge, state.tick, maker_book.best_bid(), maker_book.best_ask(), self.config.anchor, shift)
+        want = {True: bid if exposure < coin.max_position else None, False: ask if -exposure < coin.max_position else None}
+        # an empty side of the maker book leaves nothing to price against
         for side, price in want.items():
+            if price is not None and math.isnan(price):
+                want[side] = None
+        status = "quoting" if None not in want.values() else "one side" if any(want.values()) else "no quotes"
+        return Decision(status, want[True], want[False], fair, edge)
+
+    def requote(self, state: CoinState, now: int) -> None:
+        decision = self.decide(state, now, state.ledger.inventory)
+        state.status = decision.status
+        if not math.isnan(decision.fair):
+            state.fair, state.edge = decision.fair, decision.edge
+        for side, price in ((True, decision.bid), (False, decision.ask)):
             if price != state.sent[side] or (price is not None and state.refill[side]):
-                state.quotes.send(now, side, price, coin.notional / price if price is not None else 0.0)
+                state.quotes.send(now, side, price, state.coin.notional / price if price is not None else 0.0)
                 state.sent[side], state.refill[side] = price, False
 
     def on_trade(self, state: CoinState, trade: TradeEvent) -> None:
@@ -188,7 +204,7 @@ class Engine:
             fill.hedge = _vwap(book, fill.buys, fill.qty)
             if math.isnan(fill.hedge):
                 fill.hedge = book.best_bid() if fill.buys else book.best_ask()
-            fill.fee = state.ledger.fill(fill.buys, fill.price, fill.qty, fill.hedge, FEES[self.maker]["maker"], FEES[self.hedge]["taker"])
+            fill.fee = state.ledger.fill(fill.buys, fill.price, fill.qty, fill.hedge, *self.config.fees)
             state.markouts.append(fill)
             if self.journal is not None:
                 self.journal.write("fills", asdict(fill))
